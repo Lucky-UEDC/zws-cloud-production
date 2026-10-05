@@ -541,7 +541,8 @@ describe("Linux disk parsing (df -B1 -P)", () => {
     assert.equal(result.selected!.totalBytes, 85899345920)
     assert.equal(result.selected!.usedBytes, 14336000000)
     assert.equal(result.selected!.freeBytes, 71563345920)
-    assert.equal(result.selected!.usedPercent, 17)
+    // Derived from the bytes, not from df's rounded Use% column ("17%").
+    assert.ok(Math.abs(result.selected!.usedPercent - (14336000000 / 85899345920) * 100) < 0.01)
     assert.equal(result.collector, "linux_df")
   })
 

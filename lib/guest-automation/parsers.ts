@@ -150,7 +150,6 @@ export function parseLinuxDf(output: string): ParseResult {
     const total = bytes(fields[capacityIndex - 3])
     const used = bytes(fields[capacityIndex - 2])
     const free = bytes(fields[capacityIndex - 1])
-    const reportedPercent = Number(fields[capacityIndex].replace("%", ""))
     const mountPoint = fields.slice(capacityIndex + 1).join(" ") || "/"
     const device = fields.slice(0, capacityIndex - 3).join(" ")
 
@@ -176,7 +175,10 @@ export function parseLinuxDf(output: string): ParseResult {
       totalBytes: total,
       usedBytes: used,
       freeBytes: free,
-      usedPercent: Number.isFinite(reportedPercent) ? Math.min(100, Math.max(0, reportedPercent)) : percent(used, total),
+      // Derived from the byte counts, not from df's rounded Use% column: df
+      // prints whole percent, so 1.57% is reported as "2%". The panel must be
+      // able to show usedBytes / totalBytes exactly.
+      usedPercent: percent(used, total),
       system: mountPoint === "/",
     })
   }
