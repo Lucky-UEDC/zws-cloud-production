@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/db"
-import { hashSessionId, markSessionMfaVerified, resolveSession, type ResolvedSession } from "@/lib/auth/session-store"
+import { clearSessionCache, hashSessionId, markSessionMfaVerified, resolveSession, type ResolvedSession } from "@/lib/auth/session-store"
 import { LEGACY_SESSION_COOKIE_NAMES, SESSION_COOKIE_NAMES } from "@/lib/auth/session-cookies"
 import { SESSION_EXPIRED_CODE, SESSION_EXPIRED_MESSAGE, clearAuthCookies } from "@/lib/auth/session-expired-response"
 import { extractClientIp } from "@/lib/request-context"
@@ -77,6 +77,33 @@ export async function requireFullAuth(request: NextRequest, role: FullAuthRole) 
   if (session.deviceFingerprint) {
     const context = await getRequestDeviceContext(request).catch(() => null)
     if (context && deviceFingerprint(context) !== session.deviceFingerprint) {
+      // A fingerprint anchored at login time from an unparsable user-agent
+      // ("Unknown browser"/"Unknown OS") cannot carry any real device signal —
+      // it can never match a real browser request, so instead of permanently
+      // locking out genuine sessions we re-anchor the stored fingerprint to
+      // the current context. Sessions anchored from a meaningful user-agent
+      // still hard-fail on mismatch (session hijack protection).
+      const loginSession = token
+        ? await (prisma as any).userLoginSession.findFirst({
+            where: { sessionIdHash: hashSessionId(token) },
+            select: { browser: true, os: true },
+          }).catch(() => null)
+        : null
+      const loginUnparsable = !loginSession || loginSession.browser === "Unknown browser" || loginSession.os === "Unknown OS"
+      if (loginUnparsable && token) {
+        const recomputed = deviceFingerprint(context)
+        await prisma.session.updateMany({
+          where: { sessionIdHash: hashSessionId(token) },
+          data: { deviceFingerprint: recomputed },
+        }).catch(() => null)
+        await (prisma as any).userLoginSession.updateMany({
+          where: { sessionIdHash: hashSessionId(token) },
+          data: { deviceFingerprint: recomputed },
+        }).catch(() => null)
+        await clearSessionCache(session.sessionId).catch(() => null)
+        console.warn("[AUTH] session_fingerprint_reanchored", { path: request.nextUrl.pathname })
+        return { ok: true as const, session: { ...session, deviceFingerprint: recomputed } }
+      }
       await logDenied(request, session, "FINGERPRINT_MISMATCH")
       return { ok: false as const, response: unauthorized("session_fingerprint_mismatch", "Session device verification failed. Refresh the session or sign in again.", 401) }
     }

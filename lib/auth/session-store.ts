@@ -105,6 +105,18 @@ async function authLogOnce(message: string, sessionId: string, expected?: "admin
   await authLog(message, { expected: expected || null, sessionHashPrefix: hash.slice(0, 12), ...metadata }, level)
 }
 
+export async function clearSessionCache(sessionId?: string | null) {
+  if (!sessionId) return false
+  const redis = await getRedis()
+  if (!redis) return false
+  try {
+    await redis.del(redisKey(sessionId))
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function getRedis() {
   const redis = getRedisClient()
   if (!redis) return null

@@ -1252,7 +1252,6 @@ async function applyPreBootVmConfig(input: {
   displayStatus?: string
 }) {
   const config: Record<string, any> = {
-    net0: net0Value(input.macAddress || null, input.netBridge || "vmbr0"),
     ...buildPreBootVmConfig({
       vmid: input.vmid,
       hostname: input.template?.name || `vm-${input.vmid}`,
@@ -1260,6 +1259,9 @@ async function applyPreBootVmConfig(input: {
       macAddress: input.macAddress || null,
       netBridge: input.netBridge || null,
     }),
+    // net0Value wins over the preboot helper so the NIC model (virtio) is
+    // always correct even if the helper grows a net0 key again.
+    net0: net0Value(input.macAddress || null, input.netBridge || "vmbr0"),
   }
   // The generated name from buildPreBootVmConfig is a host label. Keep whatever
   // description the caller asked for and never let a ci*/ipconfig key in.

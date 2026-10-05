@@ -313,6 +313,7 @@ export function sanitizeProvisioningError(error: unknown): string {
     STORAGE_UNAVAILABLE: "Storage is unavailable, inactive, missing, or not writable.",
     INSUFFICIENT_RESOURCES: "Selected infrastructure zone has insufficient resources for this cloud server.",
     NETWORK_BRIDGE_MISSING: "Network configuration is unavailable in the selected zone.",
+    NETWORK_CONFIG_INVALID: proxmoxMessage || "Network configuration was rejected by the node.",
     CLONE_FAILED: proxmoxMessage || "Image preparation failed.",
     TLS_CERT_ERROR: "Infrastructure TLS/certificate issue.",
     TLS_HANDSHAKE_ERROR: "Infrastructure TLS handshake failed.",

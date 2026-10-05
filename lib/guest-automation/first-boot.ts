@@ -129,10 +129,9 @@ export function buildPreBootVmConfig(input: {
     name: `zws-${input.vmid}`,
   }
   if (input.description) config.description = input.description
-  if (input.macAddress) {
-    const bridge = input.netBridge || "vmbr0"
-    config.net0 = `${bridge},bridge=${bridge},macaddr=${input.macAddress}`
-  }
+  // net0 is intentionally NOT set here. `<bridge>,bridge=<bridge>,macaddr=...`
+  // is not a valid Proxmox net0 value (the primary device model must be a
+  // NIC model like virtio), and callers own net0 via net0Value().
   return config
 }
 

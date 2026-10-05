@@ -64,6 +64,7 @@ export type ProxmoxErrorCode =
   | "VMID_CONFLICT"
   | "INSUFFICIENT_RESOURCES"
   | "NETWORK_BRIDGE_MISSING"
+  | "NETWORK_CONFIG_INVALID"
   | "CLONE_FAILED"
   | "RESPONSE_TOO_LARGE"
   | "PROXMOX_NOT_JSON"
@@ -234,7 +235,9 @@ function classifyProxmoxApiError(status: number, endpoint: string, fallback?: un
   if (/already exists|vmid.*exist|newid.*exist|duplicate/.test(text)) return "VMID_CONFLICT"
   if (/not enough|insufficient|no space|out of space|quota|resource|memory|ram|cpu/.test(text)) return "INSUFFICIENT_RESOURCES"
   if (/storage.*(not|unavailable|disabled|inactive|unknown)|no such storage|datastore|does not support content/.test(text)) return "STORAGE_UNAVAILABLE"
-  if (/bridge.*(not|missing|unknown|exist)|vmbr\d+/.test(text)) return "NETWORK_BRIDGE_MISSING"
+  if (/(bridge).+(not|missing|unknown|invalid|does not exist|unavailable|no such)|invalid (bridge|net0|network)|bridge.*(error|failed)/i.test(text) && /bridge|vlan|net0|network/.test(text)) return "NETWORK_BRIDGE_MISSING"
+  if (/parameter verification failed|invalid format|net0\.model|net\d+\./i.test(text)) return "NETWORK_CONFIG_INVALID"
+  if (/vmbr\d+/.test(text) && /bridge/i.test(text) && /(not|missing|unknown|invalid|does not exist|unavailable|no such)/i.test(text)) return "NETWORK_BRIDGE_MISSING"
   if (/clone|qmclone/.test(path) || /clone|qmclone/.test(text)) return "CLONE_FAILED"
   if (status === 404) return "NOT_FOUND_404"
   return codeForStatus(status)
