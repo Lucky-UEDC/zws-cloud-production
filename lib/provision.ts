@@ -894,7 +894,7 @@ async function readGuestNetworkEvidence(
           "-c",
           "ip route show default 2>/dev/null | head -1; echo ---; cat /etc/resolv.conf 2>/dev/null",
         ])
-    const status = started?.pid ? await waitForGuestExec(client, nodeName, vmid, Number(started.pid), 20_000) : null
+    const status = started?.pid ? await waitForGuestExec(client, nodeName, vmid, Number(started.pid), isWindows ? 90_000 : 30_000) : null
     const raw = String(status?.result?.["out-data"] || "")
     if (isWindows) {
       gateway = raw.match(/GW=([^\r\n]*)/)?.[1]?.trim() || null

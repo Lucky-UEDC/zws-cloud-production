@@ -40,6 +40,37 @@ async function cacheRuntimeSnapshot(vps: any, runtime: any) {
   const runtimeStatus = normalizeProxmoxPowerState(runtime?.status)
   const dbStatus = dbStatusFromPowerState(runtimeStatus, vps.status || "UNKNOWN")
   const staleAfter = new Date(now.getTime() + VM_STATUS_CACHE_TTL_MS)
+
+  // Runtime counters report nothing about guest disk usage on most qemu
+  // installations — the reported `disk`/`maxdisk` values are 0. Writing those
+  // zeros clobbered real samples from the guest-agent disk collector and made
+  // the UI show "Disk: Unavailable" / 0 for most of the time. Carry the last
+  // real sample forward, or the runtime number only when it looks real.
+  const runtimeDiskUsed = Math.max(0, Math.floor(Number(runtime?.disk || 0)))
+  const runtimeDiskCap = Math.max(0, Math.floor(Number(runtime?.maxdisk || 0)))
+  const diskTotalLooksReal = runtimeDiskCap > 0
+    ? runtimeDiskCap >= runtimeDiskUsed && runtimeDiskCap > 1_000_000_000
+    : false
+  let lastDiskBytes: { diskUsedBytes: number; diskTotalBytes: number; diskFreeBytes?: number | null } | null = null
+  try {
+    const previous = await (prisma as any).vpsMetric.findFirst({
+      where: { vpsInstanceId: vps.id, diskTotalBytes: { gt: BigInt(0) }, diskUsedBytes: { gt: BigInt(0) } },
+      orderBy: { recordedAt: "desc" },
+      select: { diskUsedBytes: true, diskTotalBytes: true, diskFreeBytes: true },
+    })
+    if (previous) {
+      lastDiskBytes = {
+        diskUsedBytes: Number(previous.diskUsedBytes || 0),
+        diskTotalBytes: Number(previous.diskTotalBytes || 0),
+        diskFreeBytes: Number(previous.diskFreeBytes || 0),
+      }
+    }
+  } catch { /* best-effort fallback only; instrumentation must not crash the refresh */ }
+
+  const diskUsedBytes = runtimeDiskUsed > 0 || diskTotalLooksReal ? runtimeDiskUsed : lastDiskBytes?.diskUsedBytes ?? 0
+  const diskTotalBytes = diskTotalLooksReal ? runtimeDiskCap : lastDiskBytes?.diskTotalBytes ?? (runtimeDiskCap > 0 ? runtimeDiskCap : 0)
+  const diskFreeBytes = Math.max(0, lastDiskBytes?.diskFreeBytes ?? (diskTotalBytes > 0 ? diskTotalBytes - diskUsedBytes : 0))
+
   await Promise.all([
     prisma.vpsInstance.update({
       where: { id: vps.id },
@@ -53,8 +84,8 @@ async function cacheRuntimeSnapshot(vps: any, runtime: any) {
         cpuPercent: Number(runtime?.cpu || 0) * 100,
         ramUsedBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.mem || 0)))),
         ramTotalBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.maxmem || 0)))),
-        diskUsedBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.disk || 0)))),
-        diskTotalBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.maxdisk || 0)))),
+        diskUsedBytes: BigInt(diskUsedBytes),
+        diskTotalBytes: BigInt(diskTotalBytes),
         diskReadBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.diskread || 0)))),
         diskWriteBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.diskwrite || 0)))),
         networkInBytes: BigInt(Math.max(0, Math.floor(Number(runtime?.netin || 0)))),

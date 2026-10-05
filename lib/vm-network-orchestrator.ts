@@ -53,6 +53,8 @@ type ChangePrimaryIpInput = VmNetworkActionInput & {
   manualCidr?: number | string | null
   manualBridge?: string | null
   manualDns?: string | null
+  /** DNS is left untouched unless this is explicitly requested. */
+  applyDns?: boolean
   actorRole?: string | null
 }
 
@@ -1022,6 +1024,8 @@ async function updatePrimaryGuestNetwork(input: {
   targetIp: string
   pool: any
   bridge: string
+  /** Only an explicit DNS change writes DNS. */
+  applyDns?: boolean
   actorEmail: string
   reason?: string | null
   idempotencyKey: string
@@ -1106,7 +1110,8 @@ async function updatePrimaryGuestNetwork(input: {
       ip: input.targetIp,
       prefix: cidr,
       gateway,
-      dns: dns.split(/[,\s]+/).map((value) => value.trim()).filter(Boolean),
+      // Empty means "do not touch DNS" for an IP-only change.
+      dns: input.applyDns === true ? dns.split(/[,\s]+/).map((value) => value.trim()).filter(Boolean) : [],
       hostname: String(input.vm.name || input.vm.hostname || ""),
       username: String(input.vm.adminUsername || input.vm.username || "root"),
       password: resolveGuestPassword(input.vm),
@@ -1350,7 +1355,10 @@ export async function changePrimaryIp(input: ChangePrimaryIpInput) {
     if (!targetPool) throw new Error("Target IP pool not found or inactive")
     if (!forceOverride && !targetPool.staticOnly) throw new Error("Target IP pool is not static-only")
 
-    const desiredBridge = cleanText(input.manualBridge) || cleanText(targetPool.bridgeOverride) || cleanText(targetPool.bridge) || "vmbr0"
+    // An IP change is IPv4 + prefix + gateway. The bridge is the host's own
+    // decision and only moves when the caller explicitly asks for it, so an
+    // IP-only change can never move a VM between bridges (or rewrite net0).
+    const desiredBridge = cleanText(input.manualBridge) || cleanText(snapshot.net0.bridge) || cleanText(targetPool.bridgeOverride) || cleanText(targetPool.bridge) || "vmbr0"
     const networkPool = forceOverride
       ? {
           ...targetPool,
@@ -1483,6 +1491,9 @@ export async function changePrimaryIp(input: ChangePrimaryIpInput) {
         targetIp: reservation.ipAddress,
         pool: { ...reservation.pool, gateway: networkPool.gateway, cidr: networkPool.cidr, dns: networkPool.dns, bridge: desiredBridge, bridgeOverride: desiredBridge },
         bridge: desiredBridge,
+        // DNS is not part of an IP-only change. It is only touched when the
+        // caller explicitly asks for it.
+        applyDns: input.applyDns === true,
         actorEmail: input.actorEmail,
         reason,
         idempotencyKey,

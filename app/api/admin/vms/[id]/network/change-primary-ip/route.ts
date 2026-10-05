@@ -29,6 +29,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           manualGateway: body.manualGateway ? String(body.manualGateway) : null,
           manualCidr: body.manualCidr ?? null,
           manualDns: body.manualDns ? String(body.manualDns) : null,
+          // DNS is only applied when explicitly requested; an IP change is
+          // IPv4 + prefix + gateway only.
+          applyDns: body.applyDns === true,
           preserveOldIp: body.preserveOldIp === true,
           forceOverride,
           reason: body.reason ? String(body.reason) : null,

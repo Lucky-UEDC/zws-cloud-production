@@ -312,7 +312,12 @@ export async function execGuestCommand(target: GuestTarget, input: ExecInput): P
     }
   }
 
-  const timeoutMs = Math.max(1_000, input.timeoutMs ?? 30_000)
+  // Windows guests start a PowerShell host per exec and routinely need 10-40s
+  // to produce output through the QEMU guest agent; a 30s budget times out on a
+  // healthy Windows guest and looks exactly like a broken guest. Linux stays
+  // short so a hung shell is still bounded.
+  const defaultTimeoutMs = target.engine === "windows" ? 90_000 : 30_000
+  const timeoutMs = Math.max(1_000, input.timeoutMs ?? defaultTimeoutMs)
   const pollIntervalMs = Math.max(100, input.pollIntervalMs ?? DEFAULT_POLL_MS)
 
   let pid: number

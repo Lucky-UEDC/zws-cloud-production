@@ -22,8 +22,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
+        # No pinned `version` here on purpose: packageManager in package.json is
+        # the single source of truth. Pinning a second version made
+        # pnpm/action-setup abort with "Multiple versions of pnpm specified",
+        # which failed every workflow run including on main.
         with:
-          version: 10
+          run_install: false
 
       - uses: actions/setup-node@v4
         with:

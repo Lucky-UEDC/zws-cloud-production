@@ -21,6 +21,7 @@ import {
   snapshotServiceSettingsSchema,
 } from "@/lib/billing/feature-settings"
 import { configuredSiteDomain, publicOrigin, requirePublicOrigin } from "@/lib/public-url"
+import { reinstallPolicySettingsSchema, type ReinstallPolicySettings } from "@/lib/reinstall-policy"
 
 const categoryKeys = [
   "general_settings",
@@ -37,6 +38,7 @@ const categoryKeys = [
   "backup_service_settings",
   "snapshot_service_settings",
   "credit_settings",
+  "reinstall_policy_settings",
 ] as const
 
 export type SettingsCategoryKey = (typeof categoryKeys)[number]
@@ -393,6 +395,7 @@ const schemaByCategory = {
   backup_service_settings: backupServiceSettingsSchema,
   snapshot_service_settings: snapshotServiceSettingsSchema,
   credit_settings: creditSettingsSchema,
+  reinstall_policy_settings: reinstallPolicySettingsSchema,
 } as const
 
 export type GeneralSettings = z.infer<typeof generalSettingsSchema>
@@ -409,6 +412,7 @@ export type MarketingCloudComparisonSettings = z.infer<typeof marketingCloudComp
 export type BackupServiceSettings = z.infer<typeof backupServiceSettingsSchema>
 export type SnapshotServiceSettings = z.infer<typeof snapshotServiceSettingsSchema>
 export type CreditSettings = z.infer<typeof creditSettingsSchema>
+export type { ReinstallPolicySettings }
 
 type CacheEntry = { expiresAt: number; value: unknown }
 const cache = new Map<string, CacheEntry>()

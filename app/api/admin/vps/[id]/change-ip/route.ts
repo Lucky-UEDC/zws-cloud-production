@@ -25,6 +25,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       actorEmail: String(admin.email),
       targetIp: ipAddress,
       poolId: body?.poolId ? String(body.poolId) : null,
+      // DNS is only applied when explicitly requested.
+      applyDns: body?.applyDns === true,
       preserveOldIp: body?.preserveOldIp === true,
       reason: body?.reason ? String(body.reason) : "legacy_vps_change_ip_route",
       dryRun: body?.dryRun === true,

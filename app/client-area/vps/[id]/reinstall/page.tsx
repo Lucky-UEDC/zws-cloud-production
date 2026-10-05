@@ -97,6 +97,11 @@ export default function ReinstallVpsPage() {
   const [submitting, setSubmitting] = useState(false)
   const [job, setJob] = useState<VpsStatus["job"]>(null)
   const [steps, setSteps] = useState<NonNullable<VpsStatus["steps"]>>([])
+  const [allowance, setAllowance] = useState<{ allowed: boolean; reason: string | null; remaining: number; monthlyLimit: number; nextResetAt: string } | null>(null)
+  // One operation id per submitted reinstall attempt: a retried submit (double
+  // click, network retry, page reload) reuses it, so only one reinstall is
+  // ever consumed from the monthly allowance.
+  const [operationId, setOperationId] = useState("")
 
   useEffect(() => {
     async function load() {
@@ -115,6 +120,9 @@ export default function ReinstallVpsPage() {
       const logsRes = await fetch(`/api/client/vps/${id}/logs`, { cache: "no-store" })
       const logsData = await readJsonResponse<any>(logsRes)
       if (logsRes.ok) setLogs(Array.isArray(logsData.logs) ? logsData.logs.slice(0, 8) : [])
+      const allowanceRes = await fetch(`/api/client/vps/${id}/reinstall`, { cache: "no-store" })
+      const allowanceData = await readJsonResponse<any>(allowanceRes)
+      if (allowanceRes.ok && allowanceData?.allowance) setAllowance(allowanceData.allowance)
     }
     if (id) void load().catch(() => toast.error("Unable to load reinstall options"))
   }, [id])
@@ -167,7 +175,7 @@ export default function ReinstallVpsPage() {
   const strength = passwordStrength(password)
   const expectedHostname = String(status?.hostname || hostname || "").trim()
   const confirmationAccepted = confirmation.trim() === "REINSTALL" || (expectedHostname ? confirmation.trim() === expectedHostname : false)
-  const canSubmit = Boolean(templateId && adminUsername.trim() && password.length >= 12 && strength.score >= 3 && confirmationAccepted && !submitting)
+  const canSubmit = Boolean(templateId && adminUsername.trim() && password.length >= 12 && strength.score >= 3 && confirmationAccepted && !submitting && allowance?.allowed !== false)
 
   async function generatePassword() {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*"
@@ -189,6 +197,7 @@ export default function ReinstallVpsPage() {
     }
     setSubmitting(true)
     try {
+      if (!operationId) setOperationId(typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `reinstall-${Date.now()}-${Math.floor(Math.random() * 1e6)}`)
       const res = await fetch(`/api/client/vps/${id}/reinstall`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -199,10 +208,15 @@ export default function ReinstallVpsPage() {
           password,
           confirmation,
           preserveIp: true,
+          operationId,
         }),
       })
       const data = await readJsonResponse<any>(res) || {}
       if (!res.ok) throw new Error(data.error || "Unable to queue reinstall")
+      if (data?.reinstall?.nextResetAt) {
+        setAllowance((current) => current ? { ...current, remaining: Number(data.reinstall.remaining ?? current.remaining), nextResetAt: String(data.reinstall.nextResetAt) } : current)
+      }
+      setOperationId("")
       setJob({ id: data.jobId, status: "queued", progress: 0, displayStatus: "Preparing reinstall" })
       toast.success("Reinstall requested. Live progress is now available below.")
     } catch (error: any) {
@@ -245,6 +259,15 @@ export default function ReinstallVpsPage() {
               </div>
             </div>
           </div>
+
+          <Card>
+            <CardHeader><CardTitle>Monthly reinstall allowance</CardTitle></CardHeader>
+            <CardContent className="grid gap-3 text-sm sm:grid-cols-3">
+              <Detail label="Remaining" value={allowance ? `${allowance.remaining} / ${allowance.monthlyLimit} this month` : "-"} />
+              <Detail label="Next reset" value={allowance?.nextResetAt ? new Date(allowance.nextResetAt).toLocaleDateString() : "-"} />
+              <Detail label="Status" value={allowance ? (allowance.allowed ? "Available" : allowance.reason || "Unavailable") : "-"} />
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader><CardTitle>Choose Operating System</CardTitle></CardHeader>

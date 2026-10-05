@@ -233,11 +233,13 @@ function stateOf(status?: VpsStatus | null) {
   const raw = String(status?.status || "").toUpperCase()
   const runtime = String(status?.runtimeStatus || "").toLowerCase()
   const prov = String(status?.provisioningStatus || status?.currentStep || "").toUpperCase()
-  if (provisioningStates.has(raw) || provisioningStates.has(prov)) return "provisioning"
   if (["FAILED", "ERROR", "START_FAILED", "REPAIR_NEEDED"].includes(raw)) return "error"
   if (["SUSPENDED", "PENDING_TERMINATION"].includes(raw)) return "suspended"
   if (raw === "STOPPED" || runtime === "stopped") return "stopped"
+  // An active VM must look active even if a stale provisioning row says
+  // STARTING_VM: Proxmox + guest verification own the truth here.
   if (raw === "ACTIVE" || raw === "RUNNING" || raw === "OVERLOADED" || runtime === "running") return "running"
+  if (provisioningStates.has(raw) || provisioningStates.has(prov)) return "provisioning"
   return status ? "stopped" : "loading"
 }
 

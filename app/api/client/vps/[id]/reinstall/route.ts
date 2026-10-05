@@ -7,8 +7,17 @@ import { createPanelLog } from "@/lib/panel-log"
 import { parseSshPublicKey } from "@/lib/ssh-keys"
 import { isWindowsOsTemplate, osTemplateUnavailableReason, resolveAvailableOsTemplate, resolvedOsTemplateDefaultUsername } from "@/lib/os-template-availability"
 import { persistVpsConsoleMetadata } from "@/lib/console-metadata"
+import { consumeReinstallAllowanceForVps, getReinstallAllowanceForVps } from "@/lib/reinstall-allowance"
 
 type LoginMethod = "password" | "ssh" | "password_ssh"
+
+/**
+ * A reinstall runs far longer than this on a real guest (Windows clones are
+ * slow), but a lock older than this with no live reinstall job is a crashed
+ * run, not a running one. Set well above any legitimate reinstall window so a
+ * healthy run is never stolen mid-flight.
+ */
+const STALE_REINSTALL_LOCK_MS = 6 * 60 * 60 * 1000
 type ReinstallStep =
   | "validation_failed"
   | "template_not_found"
@@ -23,6 +32,26 @@ type ReinstallStep =
 
 function fail(step: ReinstallStep, error: string, status = 400) {
   return NextResponse.json({ success: false, step, error }, { status })
+}
+
+/**
+ * Customer reinstall allowance.
+ *
+ * Read-only: the reinstall page uses it to show what is left before the
+ * customer commits to a destructive operation.
+ */
+export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const customer = await getClientFromCookies()
+  const customerId = String(customer?.sub || "")
+  if (!customerId) return fail("validation_failed", "Unauthorized", 401)
+  const { id } = await params
+  const vps = await prisma.vpsInstance.findFirst({
+    where: { OR: [{ id }, { orderId: id }], customerId, deletedAt: null },
+    select: { id: true, orderId: true },
+  })
+  if (!vps) return fail("vps_not_found", "Instance not found", 404)
+  const allowance = await getReinstallAllowanceForVps({ customerId, orderId: vps.orderId })
+  return NextResponse.json({ success: true, allowance: allowance.customer })
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -62,7 +91,41 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     include: { order: true },
   })
   if (!vps?.order) return fail("vps_not_found", "Instance not found", 404)
-  if ((vps as any).reinstallLock) return fail("validation_failed", "A reinstall is already in progress for this server. Please wait for it to complete.", 409)
+  if ((vps as any).reinstallLock) {
+    // A reinstall that crashed or was abandoned mid-run used to leave the lock
+    // held forever, permanently blocking the customer from reinstalling their
+    // own server. The lock is only a concurrency guard, so a lock older than
+    // the job budget, with no reinstall job still running, is reclaimed.
+    const lockedAt = (vps as any).reinstallLockedAt ? new Date((vps as any).reinstallLockedAt).getTime() : 0
+    const staleAfterMs = STALE_REINSTALL_LOCK_MS
+    const isStale = !Number.isFinite(lockedAt) || Date.now() - lockedAt > staleAfterMs
+    const activeReinstall = isStale
+      ? await prisma.provisioningJob.findFirst({
+          where: {
+            vpsInstanceId: vps.id,
+            type: "reinstall",
+            status: { in: ["queued", "running", "retrying"] },
+            updatedAt: { gt: new Date(Date.now() - staleAfterMs) },
+          },
+          select: { id: true },
+        }).catch(() => null)
+      : null
+    if (activeReinstall) {
+      return fail("validation_failed", "A reinstall is already in progress for this server. Please wait for it to complete.", 409)
+    }
+    await prisma.vpsInstance.update({
+      where: { id: vps.id },
+      data: { reinstallLock: false, reinstallLockedAt: null },
+    }).catch(() => null)
+    await createPanelLog({
+      category: "Provisioning",
+      message: "reinstall_lock_reclaimed_stale",
+      customerId,
+      orderId: vps.orderId,
+      vpsInstanceId: vps.id,
+      metadata: { lockedAt: (vps as any).reinstallLockedAt || null, staleAfterMs },
+    }).catch(() => null)
+  }
   const orderMetadata = vps.order.metadata && typeof vps.order.metadata === "object" && !Array.isArray(vps.order.metadata) ? vps.order.metadata as Record<string, any> : {}
   const currentHostname = String(vps.name || orderMetadata.hostname || "").trim()
   // IP-only policy: reinstall always reuses the canonical IP-derived hostname; never a user-supplied name.
@@ -117,6 +180,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 
   try {
+    // Monthly allowance is consumed only when the reinstall is actually
+    // accepted, and consumption is idempotent on `operationId`, so a retried
+    // submit cannot cost the customer two reinstalls.
+    const operationId = String(body?.operationId || body?.idempotencyKey || "").trim() || `${vps.id}:${template.id}:${Date.now()}:${Math.floor(Math.random() * 1e6)}`
+    const decision = await consumeReinstallAllowanceForVps({ customerId, orderId: vps.orderId, operationId })
+    if (!decision.allowed) return fail("validation_failed", decision.reason || "Monthly reinstall limit reached.", 403)
+
     const job = await enqueueReinstallJob({
       orderId: vps.orderId,
       vpsInstanceId: vps.id,
@@ -142,9 +212,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       orderId: vps.orderId,
       vpsInstanceId: vps.id,
       vmid: vps.vmid,
-      metadata: { templateId: template.id, templateName: template.name, hostname, preserveIp },
+      metadata: { templateId: template.id, templateName: template.name, hostname, preserveIp, operationId, reinstallConsumed: !decision.duplicate, reinstallDuplicate: decision.duplicate },
     }).catch(() => null)
-    return NextResponse.json({ success: true, step: "queued", jobId: job.id })
+    return NextResponse.json({ success: true, step: "queued", jobId: job.id, reinstall: { consumed: !decision.duplicate, duplicate: decision.duplicate, remaining: decision.allowance.remaining, monthlyLimit: decision.allowance.granted, nextResetAt: decision.allowance.nextResetAt } })
   } catch (error: any) {
     const step = String(error?.step || "validation_failed") as ReinstallStep
     const safeStep = ["stop_failed", "destroy_failed", "clone_failed", "resize_failed", "config_failed", "start_failed", "verify_failed"].includes(step) ? step : "validation_failed"
