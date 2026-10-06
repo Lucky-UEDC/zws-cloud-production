@@ -26,6 +26,23 @@ describe("windows guest network evidence selects the real adapter", () => {
     assert.ok(provision.includes("async function readGuestNetworkEvidence"), "evidence reader must exist")
   })
 
+  it("builds a syntactically valid single-line command", () => {
+    // Regression found on the real Windows clone (VMID 9001): `$ip = @'x'`
+    // is a ParserError ("No characters are allowed after a here-string
+    // header"), so the command exited 1 with empty stdout and the gate read it
+    // as "no gateway". Verified against the guest: the here-string form exits
+    // 1 with a ParserError, the plain quoted form exits 0 and returns the IP.
+    assert.equal(
+      provision.includes('"$ip = @\'"'),
+      false,
+      "a here-string header must never appear mid-line in the guest command",
+    )
+    assert.ok(
+      provision.includes('"$ip = \'" + String(expectedIp || "").replace(/\'/g, "") + "\'"'),
+      "the expected IP must be interpolated into a plain single-quoted string",
+    )
+  })
+
   it("falls back to a real hardware adapter that is Up", () => {
     assert.ok(
       provision.includes("Get-NetAdapter | Where-Object { $_.HardwareInterface -and $_.Status -eq 'Up' }"),

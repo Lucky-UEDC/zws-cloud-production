@@ -897,7 +897,13 @@ async function readGuestNetworkEvidence(
           "-NonInteractive",
           "-Command",
           [
-            "$ip = @'" + String(expectedIp || "") + "'",
+            // A single-quoted here-string (`@'...'@`) is invalid mid-line: it
+            // must open and close on their own lines, so `$ip = @'10.0.0.1'`
+            // is a ParserError and the whole evidence read returns exit 1 with
+            // empty stdout - which reads as "no gateway configured" on a guest
+            // that is configured perfectly. A plain single-quoted string with
+            // the validated IPv4 interpolated is correct on one line.
+            "$ip = '" + String(expectedIp || "").replace(/'/g, "") + "'",
             "$a = Get-NetIPConfiguration | Where-Object { $ip -and $_.IPv4Address -and ($_.IPv4Address.IPAddress -contains $ip) } | Select-Object -First 1",
             "if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.HardwareInterface -and $_.Status -eq 'Up' } | Select-Object -First 1 | ForEach-Object { Get-NetIPConfiguration -InterfaceIndex $_.ifIndex } }",
             "if (-not $a) { $a = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1 }",
