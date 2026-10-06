@@ -758,7 +758,7 @@ async function verifyProvisioningHardGate(input: ProvisioningHardGateInput) {
   // rather than a warning: without the agent the guest cannot be configured at
   // all, so delivery would be a VM nobody can reach.
   const guestEvidence = qga.ok
-    ? await readGuestNetworkEvidence(input.client, input.nodeName, input.vmid, input.isWindows)
+    ? await readGuestNetworkEvidence(input.client, input.nodeName, input.vmid, input.isWindows, input.expectedIp)
     : { reachable: false as const, gateway: null, dns: [] as string[], searchDomain: null, hostname: null, sshAuthorized: false }
 
   const checks = {
@@ -874,6 +874,8 @@ async function readGuestNetworkEvidence(
   nodeName: string,
   vmid: number,
   isWindows: boolean,
+  /** The IP we asked the guest to configure, used to pick the right adapter. */
+  expectedIp?: string | null,
 ): Promise<GuestNetworkEvidence> {
   const hostnameRaw = await client.guestCmd(nodeName, vmid, "get-host-name").catch(() => null)
 
@@ -882,12 +884,27 @@ async function readGuestNetworkEvidence(
   let searchDomain: string | null = null
 
   try {
+    // Windows: pick the adapter that actually routes. `Get-NetIPConfiguration |
+    // Select -First 1` returns whatever is enumerated first, which on a Windows
+    // template is routinely a disconnected or APIPA (169.254.x) interface -
+    // which is exactly why guestGatewayApplied used to fail on healthy guests.
+    // The correct rule: the interface holding the expected IP, else the
+    // hardware interface that is Up and carries a real IPv4 and a gateway.
     const started = isWindows
       ? await client.execVMGuestCommand(nodeName, vmid, [
           "powershell",
           "-NoProfile",
+          "-NonInteractive",
           "-Command",
-          "$c = Get-NetIPConfiguration | Where-Object { $_.IPv4Address } | Select-Object -First 1; Write-Output ('GW=' + $c.IPv4DefaultGateway.NextHop); Write-Output ('DNS=' + ($c.DNSServer.ServerAddresses -join ',')); Write-Output ('SEARCH=' + $c.DNSDomain)",
+          [
+            "$ip = @'" + String(expectedIp || "") + "'",
+            "$a = Get-NetIPConfiguration | Where-Object { $ip -and $_.IPv4Address -and ($_.IPv4Address.IPAddress -contains $ip) } | Select-Object -First 1",
+            "if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.HardwareInterface -and $_.Status -eq 'Up' } | Select-Object -First 1 | ForEach-Object { Get-NetIPConfiguration -InterfaceIndex $_.ifIndex } }",
+            "if (-not $a) { $a = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1 }",
+            "Write-Output ('GW=' + $a.IPv4DefaultGateway.NextHop)",
+            "Write-Output ('DNS=' + ($a.DNSServer.ServerAddresses -join ','))",
+            "Write-Output ('SEARCH=' + $a.DNSDomain)",
+          ].join("; "),
         ])
       : await client.execVMGuestCommand(nodeName, vmid, [
           "sh",
