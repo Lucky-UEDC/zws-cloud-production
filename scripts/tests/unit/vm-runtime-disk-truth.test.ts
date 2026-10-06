@@ -15,6 +15,23 @@ describe("vm runtime snapshot must not fabricate disk metrics", () => {
     assert.ok(source.includes("diskUsedBytes: BigInt(diskUsedBytes)"))
     assert.ok(source.includes("diskTotalBytes: BigInt(diskTotalBytes)"))
   })
+
+  it("never lets a zero runtime 'used' overwrite a real sample", () => {
+    // Regression: qemu reports a real block capacity but no guest usage, so
+    // `runtime.disk === 0` while `runtime.maxdisk` looks perfectly real. An
+    // earlier version treated "the total looks real" as permission to write the
+    // zero, which put 0% disk usage back into the customer UI.
+    assert.ok(source.includes("runtimeDiskIsReal"), "runtime disk values must be gated on a positive used value")
+    assert.ok(
+      source.includes("const runtimeDiskIsReal = runtimeDiskUsed > 0 && diskTotalLooksReal"),
+      "a real-looking capacity alone must not license a zero used value",
+    )
+    assert.equal(
+      source.includes("runtimeDiskUsed > 0 || diskTotalLooksReal ? runtimeDiskUsed"),
+      false,
+      "the OR condition that admitted zero must be gone",
+    )
+  })
 })
 
 describe("customer VM state mapping", () => {

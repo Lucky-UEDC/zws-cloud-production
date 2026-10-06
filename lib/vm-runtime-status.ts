@@ -67,9 +67,19 @@ async function cacheRuntimeSnapshot(vps: any, runtime: any) {
     }
   } catch { /* best-effort fallback only; instrumentation must not crash the refresh */ }
 
-  const diskUsedBytes = runtimeDiskUsed > 0 || diskTotalLooksReal ? runtimeDiskUsed : lastDiskBytes?.diskUsedBytes ?? 0
-  const diskTotalBytes = diskTotalLooksReal ? runtimeDiskCap : lastDiskBytes?.diskTotalBytes ?? (runtimeDiskCap > 0 ? runtimeDiskCap : 0)
-  const diskFreeBytes = Math.max(0, lastDiskBytes?.diskFreeBytes ?? (diskTotalBytes > 0 ? diskTotalBytes - diskUsedBytes : 0))
+  // A zero "used" from the runtime is never trustworthy, even when the capacity
+  // looks real: qemu reports the block capacity but no guest usage, so
+  // `diskTotalLooksReal` alone must not license `runtimeDiskUsed = 0` to
+  // overwrite a real sample. Runtime values are used only when "used" is
+  // actually positive; otherwise the last real guest sample is carried forward.
+  const runtimeDiskIsReal = runtimeDiskUsed > 0 && diskTotalLooksReal
+  const diskUsedBytes = runtimeDiskIsReal ? runtimeDiskUsed : lastDiskBytes?.diskUsedBytes ?? runtimeDiskUsed
+  const diskTotalBytes = runtimeDiskIsReal
+    ? runtimeDiskCap
+    : lastDiskBytes?.diskTotalBytes ?? (runtimeDiskCap > 0 ? runtimeDiskCap : 0)
+  const diskFreeBytes = runtimeDiskIsReal
+    ? Math.max(0, runtimeDiskCap - runtimeDiskUsed)
+    : Math.max(0, lastDiskBytes?.diskFreeBytes ?? (diskTotalBytes > 0 ? diskTotalBytes - diskUsedBytes : 0))
 
   await Promise.all([
     prisma.vpsInstance.update({
