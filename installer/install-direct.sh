@@ -109,16 +109,18 @@ download_release() {
   log "Verifying release integrity..."
   local expected_sha256
   expected_sha256=$(curl -fsSL "$INSTALL_API/release.sha256" 2>/dev/null || echo "")
-  if [[ -n "$expected_sha256" ]]; then
-    local actual_sha256
-    actual_sha256=$(sha256sum "$release_archive" | awk '{print $1}')
-    if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-      fail "Release archive checksum mismatch! Expected: $expected_sha256, Got: $actual_sha256"
-    fi
-    log "Release checksum verified"
-  else
-    log "WARNING: Could not verify checksum (no checksum file available)"
+  if [[ -z "$expected_sha256" ]]; then
+    # An unverifiable archive is not installable. This used to log a warning and
+    # continue, which meant a tampered or truncated download was deployed as if
+    # it were the release.
+    fail "No checksum available for the release archive; refusing to install an unverifiable artifact"
   fi
+  local actual_sha256
+  actual_sha256=$(sha256sum "$release_archive" | awk '{print $1}')
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    fail "Release archive checksum mismatch! Expected: $expected_sha256, Got: $actual_sha256"
+  fi
+  log "Release checksum verified"
   
   # Extract release
   log "Extracting release..."

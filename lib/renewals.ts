@@ -10,7 +10,8 @@ import { renewalEmail } from "@/lib/email-templates"
 import { freeVpsIp } from "@/lib/ip-pool"
 import { createAuditLog } from "@/lib/audit-log"
 import { createPanelLog } from "@/lib/panel-log"
-import { getBrandName, getSiteUrl } from "@/lib/settings/site-settings"
+import { getSiteUrl } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { renderInvoicePdf } from "@/lib/invoices"
 import { calculateInvoiceTotals, invoiceTaxWriteFields } from "@/lib/invoices/tax"
 import { restoreBandwidthThrottle } from "@/lib/bandwidth-enforcement"
@@ -220,7 +221,7 @@ function missingReason(data: Partial<RenewalMessageData>) {
 
 export async function resolveRenewalMessageData(input: { vps: any; invoice: any }): Promise<{ data?: RenewalMessageData; error?: string }> {
   const appUrl = await getSiteUrl()
-  const brandName = await getBrandName().catch(() => "Cloud")
+  const brandName = await resolveBrandIdentity()
   const invoice = input.invoice
   const vps = input.vps
   const links = invoiceLinks(appUrl, invoice?.id || "")

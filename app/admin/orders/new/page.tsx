@@ -101,6 +101,7 @@ export default function AdminNewOrderPage() {
   const [nodes, setNodes] = useState<ProxmoxNode[]>([])
   const [ipPools, setIpPools] = useState<IpPoolOption[]>([])
   const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [vmPreview, setVmPreview] = useState<any>(null)
@@ -157,11 +158,23 @@ export default function AdminNewOrderPage() {
         fetch("/api/admin/ip-pools?purpose=provisioning"),
       ])
       const [productsBody, offersBody, osBody, nodesBody, poolsBody] = await Promise.all([readJsonResponse<any>(productsRes), readJsonResponse<any>(offersRes), readJsonResponse<any>(osRes), readJsonResponse<any>(nodesRes), readJsonResponse<any>(ipPoolsRes)])
-      if (productsRes.ok) setProducts(productsBody.products || [])
-      if (offersRes.ok) setOffers(offersBody.offers || [])
-      if (osRes.ok) setTemplates(osBody.items || [])
+      // A failed catalog API must never look like an empty catalog. This is the
+      // exact bug that produced "Product: Select product" with INR 0 pricing:
+      // a 401 from /api/admin/products was swallowed and the select rendered
+      // empty. Every failure is surfaced instead.
+      if (productsRes.ok) {
+        setProducts(Array.isArray(productsBody?.products) ? productsBody.products : [])
+      } else {
+        const reason = productsBody?.error || productsBody?.message || `HTTP ${productsRes.status}`
+        setLoadError((current) => current || `Products could not be loaded: ${reason}`)
+        toast.error(`Products could not be loaded: ${reason}`)
+      }
+      if (offersRes.ok) setOffers(Array.isArray(offersBody?.offers) ? offersBody.offers : [])
+      else toast.error(`Offers could not be loaded (HTTP ${offersRes.status})`)
+      if (osRes.ok) setTemplates(Array.isArray(osBody?.items) ? osBody.items : [])
+      else toast.error(`Operating systems could not be loaded (HTTP ${osRes.status})`)
       if (nodesRes.ok) {
-        const rawNodes = Array.isArray(nodesBody) ? nodesBody : Array.isArray(nodesBody.nodes) ? nodesBody.nodes : []
+        const rawNodes = Array.isArray(nodesBody) ? nodesBody : Array.isArray(nodesBody?.nodes) ? nodesBody.nodes : []
         setNodes(rawNodes.map((node: any) => ({
           id: String(node.id || ""),
           name: String(node.name || node.nodeName || "Node"),
@@ -169,9 +182,16 @@ export default function AdminNewOrderPage() {
           status: node.status || null,
           isActive: node.isActive !== false,
         })).filter((node: ProxmoxNode) => node.id && node.isActive))
+      } else {
+        toast.error(`Nodes could not be loaded (HTTP ${nodesRes.status})`)
       }
-      if (ipPoolsRes.ok) setIpPools((poolsBody.pools || []).filter((pool: any) => pool.isActive !== false && String(pool.poolType || "NORMAL").toUpperCase() !== "ADDON_ONLY"))
-    })().catch((error) => toast.error(error?.message || "Failed to load order form data"))
+      if (ipPoolsRes.ok) setIpPools((poolsBody?.pools || []).filter((pool: any) => pool.isActive !== false && String(pool.poolType || "NORMAL").toUpperCase() !== "ADDON_ONLY"))
+      else toast.error(`IP pools could not be loaded (HTTP ${ipPoolsRes.status})`)
+    })().catch((error) => {
+      const message = error?.message || "Failed to load order form data"
+      setLoadError(message)
+      toast.error(message)
+    })
   }, [])
 
   const selectedCustomer = selectedCustomerRecord?.id === form.customerId ? selectedCustomerRecord : null
@@ -412,7 +432,22 @@ export default function AdminNewOrderPage() {
               ]}
             />
             <SelectField label="Order source" value={form.sourceType} onChange={(sourceType) => setForm({ ...form, sourceType, productId: "", offerId: "" })} options={[["product", "Product"], ["offer", "Offer"]]} />
-            {form.sourceType === "product" ? <SelectField label="Product" value={form.productId} onChange={(productId) => setForm({ ...form, productId })} options={products.map((product) => [product.id, product.name])} /> : null}
+            {loadError ? (
+              <div className="space-y-1 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="font-medium">Order form data is incomplete</div>
+                <div>{loadError}</div>
+                <div className="text-xs">An empty product list means the catalog could not be read, not that there are no products. Pricing below is not trustworthy until this is resolved.</div>
+              </div>
+            ) : null}
+            {form.sourceType === "product" ? (
+              <SelectField
+                label="Product"
+                value={form.productId}
+                onChange={(productId) => setForm({ ...form, productId })}
+                options={products.map((product) => [product.id, `${product.name} — ₹${Number(product.price1m || 0).toLocaleString("en-IN")}/mo`])}
+                emptyMessage={loadError ? "Products could not be loaded" : "No active products in the catalog"}
+              />
+            ) : null}
             {form.sourceType === "offer" ? <SelectField label="Offer" value={form.offerId} onChange={(offerId) => setForm({ ...form, offerId })} options={offers.map((offer) => [offer.id, `${offer.name} - ${offer.vcpu} vCPU / ${offer.ramGb}GB`])} /> : null}
             {!directService ? <SelectField label="OS / Template" value={form.operatingSystemId} onChange={(operatingSystemId) => setForm({ ...form, operatingSystemId })} options={filteredTemplates.map((template) => [template.id, `${template.name}${template.proxmoxNode?.name ? ` - ${template.proxmoxNode.name}` : ""}`])} /> : null}
             {!directService ? (
@@ -746,13 +781,19 @@ function CustomerSearch({ value, selected, onSelect }: { value: string; selected
   )
 }
 
-function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: string[][] }) {
+function SelectField({ label, value, onChange, options, emptyMessage }: { label: string; value: string; onChange: (value: string) => void; options: string[][]; emptyMessage?: string }) {
   return (
     <div className="space-y-2">
       <Label>{label}</Label>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger><SelectValue placeholder={`Select ${label.toLowerCase()}`} /></SelectTrigger>
-        <SelectContent>{options.map(([optionValue, optionLabel]) => <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>)}</SelectContent>
+        <SelectContent>
+          {options.length ? options.map(([optionValue, optionLabel]) => <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>) : (
+            // An empty dropdown with only a placeholder is indistinguishable
+            // from a loading state. Say what actually happened.
+            <SelectItem value="__empty" disabled>{emptyMessage || `No ${label.toLowerCase()} available`}</SelectItem>
+          )}
+        </SelectContent>
       </Select>
     </div>
   )

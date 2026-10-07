@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db"
 import { configuredSiteDomain, publicOrigin } from "@/lib/public-url"
+import { getBrandSettings } from "@/lib/settings"
 import { getRedisClient } from "@/lib/redis"
 import { maskWhatsAppPhone, redactWhatsAppPayload, writeWhatsAppLog } from "@/lib/whatsapp/diagnostics"
 import {
@@ -710,6 +711,52 @@ export function extractTemplateVariables(...parts: Array<string | null | undefin
   return Array.from(new Set(Array.from(matches).map((match) => match[1]).filter(Boolean)))
 }
 
+/**
+ * Brand name for a message variable.
+ *
+ * The panel already resolves this authoritatively in `getBrandSettings()`
+ * (platform brand -> general brand -> company name -> configured domain). This
+ * used to default to the literal string "Cloud", so any send path that did not
+ * itself pass a brand sent customers a message signed "Cloud" — including every
+ * OTP template, which uses `{{company_name}}`.
+ *
+ * Resolution order is: explicit override, configured brand settings, configured
+ * domain. The domain is the last resort because it is always present in a real
+ * deployment and is at least an honest name for the operator.
+ */
+/**
+ * Brand name for a message variable, resolved from the passed values alone.
+ *
+ * The synchronous render helpers cannot await a settings read, so this uses only
+ * what the caller supplied, then the configured domain, then the panel default.
+ * `resolveConfiguredBrandName()` below is the async form for send paths that can
+ * read the settings, and callers should prefer it.
+ */
+function brandNameFromInput(input: WhatsAppTemplateVariables): string {
+  const explicit = stringifyVariable(input.company_name || input.brandName || "").trim()
+  if (explicit) return explicit
+  const domain = configuredSiteDomain()
+  return domain ? domain.split(".")[0] : "ZWS Cloud"
+}
+
+/**
+ * Authoritative brand name, from the configured company/brand/domain.
+ *
+ * Order: explicit override, then `getBrandSettings()` (platform brand, general
+ * brand, then company name), then the configured domain. Never a hardcoded
+ * product name.
+ */
+export async function resolveConfiguredBrandName(override?: unknown): Promise<string> {
+  const explicit = stringifyVariable(override || "").trim()
+  if (explicit) return explicit
+  const configured = await getBrandSettings()
+    .then((settings) => String(settings.brandName || settings.appName || settings.legalCompanyName || "").trim())
+    .catch(() => "")
+  if (configured) return configured
+  const domain = configuredSiteDomain()
+  return domain ? domain.split(".")[0] : "ZWS Cloud"
+}
+
 export function buildSmartVariables(input: WhatsAppTemplateVariables = {}): Record<string, unknown> {
   const firstName = stringifyVariable(input.first_name || input.firstName || input.name || input.username || "there").split(/\s+/)[0] || "there"
   const timezone = stringifyVariable(input.timezone || "Asia/Kolkata")
@@ -723,7 +770,8 @@ export function buildSmartVariables(input: WhatsAppTemplateVariables = {}): Reco
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"
   const phone = stringifyVariable(input.phone || "")
   return {
-    company_name: "Cloud",
+    company_name: brandNameFromInput(input),
+    brandName: brandNameFromInput(input),
     support_email: sampleSupportEmail(),
     support_phone: "",
     website_url: publicOrigin(),

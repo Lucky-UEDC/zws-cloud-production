@@ -75,7 +75,12 @@ export async function GET(_request: NextRequest) {
       overageGb: usage.overageGb,
       overStoragePercent: usage.overStoragePercent,
       capReached: usage.capReached,
+      // The effective limit, plus both source values so the page can explain the
+      // number rather than assert it.
       maxBackups: usage.maxBackups,
+      effectiveBackupLimit: usage.effectiveBackupLimit ?? usage.maxBackups,
+      planMaxBackups: usage.planMaxBackups ?? null,
+      retentionCount: usage.retentionCount ?? null,
       backupsRemaining: usage.backupsRemaining,
       planName: usage.planName,
       planId: usage.planId,

@@ -3,7 +3,8 @@ import { sendEmail } from "@/lib/mailer"
 import { sendTemplateEmail } from "@/lib/email/send-mail"
 import { defaultTemplateVariables } from "@/lib/email/templates"
 import { prisma } from "@/lib/db"
-import { getBrandName, getSiteUrl } from "@/lib/settings/site-settings"
+import { getSiteUrl } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { createPanelLog } from "@/lib/panel-log"
 import type { ChannelResult, NotificationData, NotificationResult, SendNotificationInput } from "@/lib/notifications/types"
 import { maskWhatsAppPhone } from "@/lib/whatsapp/format"
@@ -153,7 +154,9 @@ async function sendWhatsAppChannel(input: SendNotificationInput): Promise<Channe
     return { ok: false, status: "skipped", error: "WhatsApp service update is not an allowed customer event" }
   }
 
-  const brandName = String(input.data?.brandName || await getBrandName().catch(() => "Cloud"))
+  const brandName = await resolveBrandIdentity(
+    input.data?.brandName == null ? null : String(input.data.brandName),
+  )
   const vpsInstanceId = String(input.data?.metadata?.vpsInstanceId || input.data?.vpsInstanceId || "")
   const logicalStatus = String(
     input.data?.metadata?.eventStatus ||
@@ -196,7 +199,7 @@ async function sendWhatsAppChannel(input: SendNotificationInput): Promise<Channe
       message_text: String(input.data?.message || input.data?.text || `Your ${brandName} update is ready.`),
       customer_name: input.user.name || "there",
       order_id: firstText(dataText(input.data, "orderNumber"), dataText(input.data, "orderId"), dataText(input.data, "invoiceNumber")),
-      server_name: firstText(dataText(input.data, "serviceName"), dataText(input.data, "service_name"), dataText(input.data, "hostname"), "Cloud server"),
+      server_name: firstText(dataText(input.data, "serviceName"), dataText(input.data, "service_name"), dataText(input.data, "hostname"), "your server"),
       deployment_stage: firstText(dataText(input.data, "deployment_stage"), dataText(input.data, "payment_status"), dataText(input.data, "status"), "Deployment started"),
       ip_address: firstText(dataText(input.data, "ip_address"), dataText(input.data, "server_ip"), dataText(input.data, "primaryIp")),
       dashboard_url: firstText(dataText(input.data, "dashboard_url"), dataText(input.data, "dashboardUrl"), await getSiteUrl().then((url) => `${url.replace(/\/$/, "")}/client-area`).catch(() => "")),

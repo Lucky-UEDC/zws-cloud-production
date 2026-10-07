@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db"
 import { formatCurrency } from "@/lib/currency-format"
 import { publicOrigin } from "@/lib/public-url"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { sendWhatsAppMessage } from "@/lib/whatsapp/queue"
 import { WHATSAPP_TEMPLATE_KEYS } from "@/lib/whatsapp/template-registry"
 import { markOutboundEventDelivery, reserveOutboundEventDelivery } from "@/lib/outbound-event-delivery"
@@ -28,7 +28,7 @@ export async function emitWhatsAppAutomationEvent(input: {
     where: { eventType: input.eventType, enabled: true },
   })
   if (!rules.length) return null
-  const brandName = await getBrandName().catch(() => "Cloud")
+  const brandName = await resolveBrandIdentity()
 
   return Promise.allSettled(rules.map(async (rule) => {
     const reserved = input.dedupeKey

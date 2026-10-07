@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db"
 import { getBackupServiceSettings, type BackupServiceSettings } from "@/lib/settings"
 import { createPanelLog } from "@/lib/panel-log"
 import { bytesFromGb, gbFromBytes, round2, mulAmount } from "@/lib/billing/money"
+import { effectiveBackupLimit } from "@/lib/backups-retention-limit"
 
 export type BackupEntitlementOptions = {
   maxBackups: number | null
@@ -212,7 +213,7 @@ export async function computeBackupUsageSummary(customerId: string, options: { e
   const usage = await computeBackupUsageForCustomer(customerId)
   if (!entitlement) {
     const zeroRemaining = 0n
-    return { ...usage, entitled: false, entitleed: false, storageQuotaGb: 0, storageQuotaBytes: 0n, remainingBytes: zeroRemaining, remainingGb: 0, overStorage: false, overageEnabled: false, overageGb: 0, overStoragePercent: 0, capReached: false, maxBackups: null, backupsRemaining: 0, planName: null, planId: null, subscriptionId: null, status: "none" as const, overageRatePerGb: 0 }
+    return { ...usage, entitled: false, entitleed: false, storageQuotaGb: 0, storageQuotaBytes: 0n, remainingBytes: zeroRemaining, remainingGb: 0, overStorage: false, overageEnabled: false, overageGb: 0, overStoragePercent: 0, capReached: false, maxBackups: null, effectiveBackupLimit: null, planMaxBackups: null, retentionCount: null, backupsRemaining: 0, planName: null, planId: null, subscriptionId: null, status: "none" as const, overageRatePerGb: 0 }
   }
   const over = resolveOverStorage({
     usedBytes: usage.usedBytes,
@@ -220,7 +221,13 @@ export async function computeBackupUsageSummary(customerId: string, options: { e
     overageEnabled: entitlement.overageEnabled,
     maxStorageCapGb: entitlement.maxStorageCapGb,
   })
-  const backupsRemaining = entitlement.maxBackups == null ? null : Math.max(0, entitlement.maxBackups - usage.backupCount)
+  // One limit, not two. `maxBackups` and `retentionCount` disagreed on the
+  // production plan (15 vs 10) and this arithmetic used only `maxBackups`, so a
+  // customer was told "5 of 15 backups remaining" while retention was pruning
+  // to 10. Retention is the promise about what survives, so the stricter of the
+  // two is what is enforced and what is reported.
+  const effectiveLimit = effectiveBackupLimit({ maxBackups: entitlement.maxBackups ?? null, retentionCount: entitlement.retentionCount ?? null })
+  const backupsRemaining = effectiveLimit == null ? null : Math.max(0, effectiveLimit - usage.backupCount)
   const remainingBytes = entitlement.storageQuotaBytes > usage.usedBytes ? entitlement.storageQuotaBytes - usage.usedBytes : 0n
   return {
     ...usage,
@@ -234,7 +241,11 @@ export async function computeBackupUsageSummary(customerId: string, options: { e
     overageGb: over.overageGb,
     overStoragePercent: over.overStoragePercent,
     capReached: over.capReached,
-    maxBackups: entitlement.maxBackups,
+    // Reported under both names so every existing surface shows the same number.
+    maxBackups: effectiveLimit,
+    effectiveBackupLimit: effectiveLimit,
+    planMaxBackups: entitlement.maxBackups ?? null,
+    retentionCount: entitlement.retentionCount ?? null,
     backupsRemaining,
     planName: entitlement.planName,
     planId: entitlement.planId,

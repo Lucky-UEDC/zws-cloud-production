@@ -84,14 +84,36 @@ function percent(used: number, total: number): number {
   return Math.round(Math.min(100, Math.max(0, value)) * 100) / 100
 }
 
-/** used + free must reconcile with total, otherwise the row is untrustworthy. */
-function rowIsConsistent(total: number, used: number, free: number): boolean {
+/**
+ * `used + free` must reconcile with `total`, otherwise the row is untrustworthy.
+ *
+ * `df` prints Available, not Free. ext2/3/4 and XFS hold blocks back for root,
+ * so on any stock Debian or Ubuntu root `used + available` falls short of
+ * `1-blocks` by that reserve: a real Debian 11 root clone reported
+ * 1114353664 + 710397952 against a 1942188032 total, a 6.05% gap. That reserve
+ * belongs to the filesystem, not to the parse, so the Linux caller passes the
+ * Use% column df printed and the row is instead required to agree with df's own
+ * arithmetic. That is a strictly stronger alignment check than a size
+ * tolerance, and it is what proves the numbers came from the right columns.
+ *
+ * The Windows callers derive `used` from the same reported numbers
+ * (`total - freeSpace`), so their rows reconcile exactly and keep the strict
+ * size check. Only `df` needs the reserved-block form.
+ */
+function rowIsConsistent(total: number, used: number, free: number, dfUsePercent?: number): boolean {
   if (!(total > 0)) return false
+  if (used < 0 || free < 0) return false
   if (used > total) return false
   if (free > total) return false
-  // POSIX reserves some blocks; allow a generous 5% slack either way.
-  const slack = total * 0.05
-  return Math.abs(total - (used + free)) <= slack
+  const pool = used + free
+  if (dfUsePercent === undefined) {
+    return Math.abs(total - pool) <= total * 0.05
+  }
+  // df computes Use% as ceil(100 * used / (used + available)). A row whose
+  // offsets were misread cannot reproduce it, and the sum of the two reported
+  // columns can never exceed the total it was derived from.
+  if (pool <= 0 || pool > total) return false
+  return Math.abs(Math.ceil((used / pool) * 100) - dfUsePercent) <= 1
 }
 
 function selectLinuxRoot(volumes: ParsedVolume[]): ParsedVolume | null {
@@ -112,9 +134,11 @@ function selectLinuxRoot(volumes: ParsedVolume[]): ParsedVolume | null {
  * the `Use%` column rather than from either edge. That is what makes a
  * positional parse safe.
  *
- * The reported percentage is taken from `df` itself: it accounts for the
- * filesystem's reserved blocks, so recomputing `used / total` systematically
- * disagrees with the number the guest itself reports.
+ * The percentage handed to the panel is computed from the byte counts rather
+ * than copied out of `df`, because `df` prints whole percent and the panel has
+ * to be able to show `usedBytes / totalBytes` exactly. `df`'s own percentage is
+ * still read: it is the value the row is reconciled against, so a misaligned
+ * read is rejected instead of being turned into a plausible-looking volume.
  */
 export function parseLinuxDf(output: string): ParseResult {
   const text = String(output || "")
@@ -153,7 +177,8 @@ export function parseLinuxDf(output: string): ParseResult {
     const mountPoint = fields.slice(capacityIndex + 1).join(" ") || "/"
     const device = fields.slice(0, capacityIndex - 3).join(" ")
 
-    if (!rowIsConsistent(total, used, free)) {
+    const dfUsePercent = Number(fields[capacityIndex].slice(0, -1))
+    if (!rowIsConsistent(total, used, free, dfUsePercent)) {
       rejected++
       continue
     }

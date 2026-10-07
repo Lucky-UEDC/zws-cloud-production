@@ -1,10 +1,10 @@
 import { prisma } from "@/lib/db"
 import { sendEmail } from "@/lib/mailer"
 import { createAuditLog } from "@/lib/audit-log"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 
 async function main() {
-  const brandName = await getBrandName().catch(() => "Cloud")
+  const brandName = await resolveBrandIdentity()
   const systemAdmin = await prisma.adminProfile.findFirst({
     where: { role: "admin" },
     select: { id: true },

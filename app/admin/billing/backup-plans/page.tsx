@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "sonner"
 import { formatCurrency } from "@/lib/currency-format"
+import { effectiveBackupLimit as planBackupLimit } from "@/lib/backups-retention-limit"
 
 type BackupPlan = Record<string, any>
 type SnapshotPlan = Record<string, any>
@@ -26,6 +27,7 @@ export default function AdminBillingPlansPage() {
   const [name, setName] = useState("")
   const [price, setPrice] = useState("")
   const [maxBackups, setMaxBackups] = useState("10")
+  const [retentionCount, setRetentionCount] = useState("10")
   const [quota, setQuota] = useState("100")
   const [overagePrice, setOveragePrice] = useState("1")
   const [saving, setSaving] = useState(false)
@@ -85,6 +87,11 @@ export default function AdminBillingPlansPage() {
         name: name.trim(),
         price: Number(price || 0),
         maxBackups: gb(maxBackups),
+        // Retention is now an explicit, visible part of the plan. It used to be
+        // seeded once and never editable, so an admin who raised maxBackups to
+        // 15 silently kept a hidden retention of 10 - and the plan page sold the
+        // customer both numbers.
+        retentionCount: gb(retentionCount),
         storageQuotaGb: gb(quota),
         overagePricePerGb: Number(overagePrice || 0),
       }
@@ -114,6 +121,7 @@ export default function AdminBillingPlansPage() {
     setName(plan.name)
     setPrice(String(Number(plan.price || 0)))
     setMaxBackups(String(plan.maxBackups ?? 10))
+    setRetentionCount(String(plan.retentionCount ?? plan.maxBackups ?? 10))
     setQuota(String(plan.storageQuotaGb ?? 100))
     setOveragePrice(String(Number(plan.overagePricePerGb || 0)))
   }
@@ -259,7 +267,12 @@ export default function AdminBillingPlansPage() {
               <div className="grid gap-3 rounded-md border border-border/40 bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-5">
                 <div className="space-y-1.5"><Label>Name</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Pro Backup" /></div>
                 <div className="space-y-1.5"><Label>Price/mo (INR)</Label><Input type="number" min={0} value={price} onChange={(e) => setPrice(e.target.value)} /></div>
-                <div className="space-y-1.5"><Label>Max backups</Label><Input type="number" min={0} value={maxBackups} onChange={(e) => setMaxBackups(e.target.value)} /></div>
+                <div className="space-y-1.5"><Label>Max backups</Label><Input type="number" min={0} value={maxBackups} onChange={(e) => { setMaxBackups(e.target.value); if (!planId) setRetentionCount(e.target.value) }} /></div>
+                <div className="space-y-1.5">
+                  <Label>Retention (kept)</Label>
+                  <Input type="number" min={0} value={retentionCount} onChange={(e) => setRetentionCount(e.target.value)} />
+                  <p className="text-xs text-muted-foreground">Oldest beyond this are pruned automatically. The binding limit is the lower of the two.</p>
+                </div>
                 <div className="space-y-1.5"><Label>Quota (GB)</Label><Input type="number" min={0} value={quota} onChange={(e) => setQuota(e.target.value)} /></div>
                 <div className="space-y-1.5"><Label>Overage (₹/GB)</Label><Input type="number" min={0} value={overagePrice} onChange={(e) => setOveragePrice(e.target.value)} /></div>
                 <div className="sm:col-span-2 lg:col-span-5 flex gap-2">
@@ -288,7 +301,12 @@ export default function AdminBillingPlansPage() {
                           <p className="text-xs text-muted-foreground">{plan.slug}</p>
                         </TableCell>
                         <TableCell>{formatCurrency(Number(plan.price || 0), plan.currency)}</TableCell>
-                        <TableCell>{plan.maxBackups}</TableCell>
+                        <TableCell>
+                          {planBackupLimit(plan) == null ? "Unlimited" : planBackupLimit(plan)}
+                          {planBackupLimit(plan) != null && planBackupLimit(plan) !== Number(plan.maxBackups) ? (
+                            <p className="text-xs text-muted-foreground">max {plan.maxBackups}, retention {plan.retentionCount}</p>
+                          ) : null}
+                        </TableCell>
                         <TableCell>{plan.storageQuotaGb} GB</TableCell>
                         <TableCell>{formatCurrency(Number(plan.overagePricePerGb || 0), plan.currency)}/GB</TableCell>
                         <TableCell>{plan.archived ? <Badge variant="outline">Archived</Badge> : plan.active ? <Badge>Active</Badge> : <Badge variant="outline">Inactive</Badge>}</TableCell>

@@ -532,7 +532,7 @@ describe("Linux disk parsing (df -B1 -P)", () => {
       "Filesystem     1B-blocks       Used  Available Use% Mounted on",
       "/dev/sda1      85899345920 14336000000 71563345920  17% /",
       "tmpfs           1073741824         0 1073741824   0% /dev/shm",
-      "/dev/sdb1     214748364800 1073741824 213674623976   1% /data",
+      "/dev/sdb1     214748364800 1073741824 213674622976   1% /data",
     ].join("\n")
     const result = parseLinuxDf(output)
     assert.equal(result.ok, true)
@@ -570,7 +570,7 @@ describe("Linux disk parsing (df -B1 -P)", () => {
     const output = [
       "Filesystem     1B-blocks       Used  Available Use% Mounted on",
       "tmpfs          1073741824         0 1073741824   0% /run",
-      "/dev/sdb1    214748364800 1073741824 213674623976   1% /data",
+      "/dev/sdb1    214748364800 1073741824 213674622976   1% /data",
     ].join("\n")
     const result = parseLinuxDf(output)
     assert.equal(result.ok, true)

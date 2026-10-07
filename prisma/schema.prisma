@@ -5136,7 +5136,14 @@ model GuestOperationTemplate {
   /// "guest-native" uses a `qm guest cmd` verb; "guest-exec" runs a shell command.
   commandType          String          @default("guest-exec") @map("command_type")
   /// linux-sh | linux-bash | windows-powershell | windows-cmd | windows-netsh
-  shell                String          @default("linux-sh")
+  ///
+  /// Nullable on purpose: a `guest-native` operation runs no shell at all, so
+  /// storing one would be an inert field that reads as though it constrained
+  /// anything. The column was NOT NULL, which meant every attempt to save a
+  /// guest automation template failed -- the four native operations always
+  /// serialise to a null shell. Readers already treat null as "no shell" and
+  /// fall back to the engine's default.
+  shell                String?         @default("linux-sh")
   /// Template command body. Placeholders are resolved server-side only.
   command              String?
   /// Structured argv used when commandType is guest-native.

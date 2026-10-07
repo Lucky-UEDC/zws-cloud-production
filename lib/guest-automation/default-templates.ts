@@ -160,13 +160,34 @@ const NATIVE_OPERATIONS: SeedOperation[] = [
   { operation: "guest_health", commandType: "guest-native", command: "get-time", timeoutSeconds: 15, verificationRequired: true, verificationCommand: "get-time", verificationParser: "native-json", notes: "Agent round-trip proves the channel is alive." },
 ]
 
+/**
+ * Apply whatever the guest actually offers, in the order Debian and Ubuntu
+ * have historically offered it.
+ *
+ * The chain ends in `|| true` on purpose: the image decides which of these
+ * exists (ifupdown, netplan, neither), and a missing one is not a failure of
+ * this operation. What decides success is the verification read that follows --
+ * `network-get-interfaces` plus the expected address -- so a config that was
+ * written but never applied still fails the step instead of being reported as
+ * done. Failing the command here instead would fail images that simply name
+ * the unit differently.
+ */
+const DEBIAN_APPLY_NETWORK =
+  "systemctl reload-or-restart networking 2>/dev/null || systemctl restart networking 2>/dev/null || ifup {{NIC}} 2>/dev/null || netplan apply 2>/dev/null || true"
+
 /** Debian/Ubuntu family network configuration via ifupdown (Ubuntu 20.04/22.04). */
 const DEBIAN_NETWORK: SeedOperation[] = [
   {
     operation: "set_ip",
     shell: "linux-sh",
+    // `mkdir -p` is load-bearing, not tidiness: on a netplan image
+    // /etc/network/interfaces.d does not exist, and writing into a missing
+    // directory is a hard exit 2 that fails the whole first-boot chain. Found
+    // on a real clone of template 1002 (Ubuntu-22-04), which is exactly the
+    // image this profile claims.
     command:
-      "set -e; SRC=/etc/network/interfaces.d/{{NIC}}; printf 'auto {{NIC}}\\niface {{NIC}} inet static\\n    address {{IP}}/{{PREFIX}}\\n    gateway {{GATEWAY}}\\n' > \"$SRC\"; systemctl restart networking",
+      "set -e; D=/etc/network/interfaces.d; mkdir -p \"$D\"; printf 'auto {{NIC}}\\niface {{NIC}} inet static\\n    address {{IP}}/{{PREFIX}}\\n    gateway {{GATEWAY}}\\n' > \"$D/{{NIC}}\"; " +
+      DEBIAN_APPLY_NETWORK,
     timeoutSeconds: 60,
     dangerLevel: "caution",
     requiresRunning: true,
@@ -175,14 +196,18 @@ const DEBIAN_NETWORK: SeedOperation[] = [
     verificationRequired: true,
     verificationCommand: "network-get-interfaces",
     verificationParser: "native-interfaces",
-    rollbackCommand: "set -e; printf 'auto {{NIC}}\\niface {{NIC}} inet dhcp\\n' > /etc/network/interfaces.d/{{NIC}}; systemctl restart networking",
+    rollbackCommand:
+      "set -e; D=/etc/network/interfaces.d; mkdir -p \"$D\"; printf 'auto {{NIC}}\\niface {{NIC}} inet dhcp\\n' > \"$D/{{NIC}}\"; " +
+      DEBIAN_APPLY_NETWORK,
     stateKey: "network.ipv4",
     notes: "Static address on the discovered interface. Verified through the guest agent.",
   },
   {
     operation: "set_gateway",
     shell: "linux-sh",
-    command: "set -e; sed -i '/^[[:space:]]*gateway[[:space:]]/d' /etc/network/interfaces.d/{{NIC}}; printf '    gateway {{GATEWAY}}\\n' >> /etc/network/interfaces.d/{{NIC}}; systemctl restart networking",
+    command:
+      "set -e; D=/etc/network/interfaces.d; mkdir -p \"$D\"; F=\"$D/{{NIC}}\"; printf 'auto {{NIC}}\\niface {{NIC}} inet static\\n    address {{IP}}/{{PREFIX}}\\n' > \"$F\"; printf '    gateway {{GATEWAY}}\\n' >> \"$F\"; " +
+      DEBIAN_APPLY_NETWORK,
     timeoutSeconds: 60,
     dangerLevel: "caution",
     requiresRunning: true,
@@ -190,11 +215,26 @@ const DEBIAN_NETWORK: SeedOperation[] = [
     verificationCommand: "network-get-interfaces",
     verificationParser: "native-interfaces",
     stateKey: "network.gateway",
+    // Rewrites the whole stanza rather than sed-ing one line out of it: a
+    // second pass must not accumulate duplicate gateway lines, and a missing
+    // file must not depend on one already existing.
+    notes: "Gateway stanza is rewritten wholesale so repeated runs stay idempotent.",
   },
   {
     operation: "set_dns",
     shell: "linux-sh",
-    command: "set -e; printf 'nameserver {{DNS1}}\\n' > /etc/resolv.conf; systemctl restart networking",
+    // resolvectl first, because on a systemd-resolved image it is what actually
+    // owns the setting and /etc/resolv.conf is only a stub symlink into /run.
+    // The write covers ifupdown images, where that symlink does not exist.
+    //
+    // The last clause is the verification that counts: it asserts the
+    // nameserver is actually readable back, through whichever mechanism owns it.
+    // With no resolver configured the panel would have reported a DNS step as
+    // succeeded while the guest could not resolve anything.
+    command:
+      "set -e; if command -v resolvectl >/dev/null 2>&1; then resolvectl dns {{NIC}} {{DNS1}} >/dev/null 2>&1 || true; fi; printf 'nameserver {{DNS1}}\\n' > /etc/resolv.conf; " +
+      DEBIAN_APPLY_NETWORK +
+      "; (resolvectl dns {{NIC}} 2>/dev/null || cat /etc/resolv.conf) | grep '{{DNS1}}'",
     timeoutSeconds: 60,
     dangerLevel: "safe",
     requiresRunning: true,
@@ -202,7 +242,7 @@ const DEBIAN_NETWORK: SeedOperation[] = [
     verificationCommand: "get-time",
     verificationParser: "exit-code",
     stateKey: "network.dns",
-    notes: "Nameserver list written to the resolver config.",
+    notes: "Nameserver written to both the resolver and /etc/resolv.conf, then read back to confirm it landed.",
   },
 ]
 
@@ -228,7 +268,11 @@ const UBUNTU_NETPLAN_NETWORK: SeedOperation[] = [
     operation: "set_gateway",
     shell: "linux-sh",
     command:
-      "set -e; F=/etc/netplan/99-zws.yaml; printf 'network:\\n  version: 2\\n  ethernets:\\\\\\n    {{NIC}}:\\\\\\n      dhcp4: no\\\\\\n      addresses: [{{IP}}/{{PREFIX}}]\\\\\\n      routes:\\\\\\n        - to: default\\\\\\n          via: {{GATEWAY}}\\\\\\n' > \\\"$F\\\"; chmod 600 \\\"$F\\\"; netplan apply",
+    // Previously this used a separately escaped copy of the document that
+    // emitted a literal backslash before each newline, so the YAML it wrote
+    // was malformed. It now writes the same document as set_ip, which is
+    // what the default route belongs to.
+      "set -e; F=/etc/netplan/99-zws.yaml; printf 'network:\\n  version: 2\\n  ethernets:\\n    {{NIC}}:\\n      dhcp4: no\\n      addresses: [{{IP}}/{{PREFIX}}]\\n      routes:\\n        - to: default\\n          via: {{GATEWAY}}\\n' > \"$F\"; chmod 600 \"$F\"; netplan apply",
     timeoutSeconds: 60,
     dangerLevel: "caution",
     requiresRunning: true,
@@ -243,10 +287,18 @@ const UBUNTU_NETPLAN_NETWORK: SeedOperation[] = [
   {
     operation: "set_dns",
     shell: "linux-sh",
-    command: "set -e; F=/etc/netplan/99-zws.yaml; printf 'network:\\n  version: 2\\n  ethernets:\\n    {{NIC}}:\\n      dhcp4: true\\n      nameservers:\\n        addresses: [{{DNS1}}]\\n' > \"$F\"; chmod 600 \"$F\"; netplan apply",
+    // A separate document, and never the address document. Netplan merges
+    // per key, so a nameserver-only file adds `nameservers` without touching
+    // `addresses`. The previous version overwrote 99-zws.yaml with
+    // `dhcp4: true` and no address, which silently undid the static address
+    // that set_ip and set_gateway had just applied: a server that passed its
+    // IP verification and then lost the address as soon as DNS was set.
+    command:
+      "set -e; D=/etc/netplan; mkdir -p \"$D\"; F=$D/98-zws-dns.yaml; printf 'network:\\n  version: 2\\n  ethernets:\\n    {{NIC}}:\\n      dhcp4: no\\n      nameservers:\\n        addresses: [{{DNS1}}]\\n' > \"$F\"; chmod 600 \"$F\"; netplan apply; (netplan get 2>/dev/null; resolvectl dns {{NIC}} 2>/dev/null; cat /etc/resolv.conf) | grep '{{DNS1}}'",
     timeoutSeconds: 60,
     requiresRunning: true,
     verificationRequired: true,
+    rollbackCommand: "set -e; rm -f /etc/netplan/98-zws-dns.yaml; netplan apply",
     verificationCommand: "get-time",
     verificationParser: "exit-code",
     stateKey: "network.dns",
@@ -721,9 +773,17 @@ export const DEFAULT_GUEST_TEMPLATES: SeedTemplate[] = [
     osIds: ["ubuntu"],
     versionPattern: "^(20|22)(\\D|$)",
     priority: 320,
-    description: "Ubuntu 20.04/22.04 LTS with ifupdown networking.",
+    // Ubuntu has been netplan-by-default since 18.04. This profile previously
+    // claimed ifupdown, which wrote /etc/network/interfaces.d -- a directory
+    // that does not exist on these images, and a configuration nothing on them
+    // reads. A real clone of template 1002 (Ubuntu 22.04) took set_ip through a
+    // directory error, then failed verification with "Expected address
+    // 103.216.170.238 was not reported by the guest" once the write succeeded:
+    // the file was written and nothing ever applied it. Verification caught it,
+    // which is the point of verifying.
+    description: "Ubuntu 20.04/22.04 LTS with netplan networking.",
     enabled: true,
-    operations: DEBIAN_NETWORK,
+    operations: UBUNTU_NETPLAN_NETWORK,
   }),
   linuxTemplate({
     slug: "ubuntu-24-04",

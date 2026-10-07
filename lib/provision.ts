@@ -541,7 +541,56 @@ async function ensureLinuxPasswordSshAccess(input: {
   accessMethod?: string | null
 }) {
   if (!String(input.accessMethod || "").toUpperCase().includes("PASSWORD")) return
-  await input.client.setVMGuestPassword(input.nodeName, input.vmid, input.username, input.password, false)
+
+  // The password is set through the guest shell with chpasswd, which is the
+  // Linux-native path, and is delivered on stdin so it never appears in argv or
+  // in the Proxmox task description.
+  //
+  // This used to call the native `set-user-password` QGA verb. That verb hangs
+  // on Linux: a real Ubuntu 22.04 clone answered it with "VM 500003 qga command
+  // 'guest-set-user-password' failed - got timeout", after 60 seconds, with the
+  // guest reachable and every other guest command succeeding. The guest had
+  // already had its password set by the create_user step through chpasswd, so
+  // this call was a redundant belt-and-braces check that could only ever fail
+  // the order.
+  const passwordCommand = [
+    "/bin/sh",
+    "-c",
+    "set -eu; read -r SECRET; printf '%s:%s\\n' " + JSON.stringify(String(input.username || "")) + ' "$SECRET" | chpasswd',
+  ]
+  let passwordSet = false
+  let lastPasswordError: unknown = null
+  for (let attempt = 1; attempt <= 3 && !passwordSet; attempt++) {
+    try {
+      const started = await input.client.execVMGuestCommandWithInput(
+        input.nodeName,
+        input.vmid,
+        passwordCommand,
+        `${String(input.password || "")}\n`,
+      )
+      const status = await waitForGuestExec(input.client, input.nodeName, input.vmid, Number(started.pid), 30_000)
+      const result = status?.result || status || {}
+      if (result.exited === true || result.exited === 1) {
+        if (Number(result.exitcode || 0) === 0) {
+          passwordSet = true
+          break
+        }
+        lastPasswordError = new Error(`chpasswd exited ${Number(result.exitcode || 0)}`)
+      } else {
+        lastPasswordError = new Error("chpasswd did not report an exit within 30s")
+      }
+    } catch (error) {
+      lastPasswordError = error
+    }
+    if (!passwordSet && attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000 * attempt))
+    }
+  }
+  if (!passwordSet) {
+    throw new Error(
+      `linux_password_set_failed: ${sanitizeProvisioningError(lastPasswordError)}`,
+    )
+  }
   const command = [
     "set -eu",
     "install -d -m 0755 /etc/ssh/sshd_config.d",
@@ -915,7 +964,12 @@ async function readGuestNetworkEvidence(
       : await client.execVMGuestCommand(nodeName, vmid, [
           "sh",
           "-c",
-          "ip route show default 2>/dev/null | head -1; echo ---; cat /etc/resolv.conf 2>/dev/null",
+          // The resolver answer does not live in one file on a modern Linux
+          // image. /etc/resolv.conf is a stub (127.0.0.53) on systemd-resolved
+          // guests, and the intended nameserver is set through netplan or
+          // resolvectl. Read every surface that could own it and publish all
+          // addresses, so the gate can confirm the intended one is configured.
+          "ip route show default 2>/dev/null | head -1; echo ---; (grep -h '^nameserver' /etc/resolv.conf 2>/dev/null; resolvectl dns 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+'; netplan get 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+')",
         ])
     const status = started?.pid ? await waitForGuestExec(client, nodeName, vmid, Number(started.pid), isWindows ? 90_000 : 30_000) : null
     const raw = String(status?.result?.["out-data"] || "")
@@ -926,7 +980,13 @@ async function readGuestNetworkEvidence(
     } else {
       const [route, resolver = ""] = raw.split(/^---$/m)
       gateway = route?.match(/via\s+(\S+)/)?.[1]?.trim() || null
-      dns = splitList(resolver.replace(/#.*/g, "\n").replace(/^nameserver\s+/gim, ""))
+      dns = Array.from(new Set(
+        resolver
+          .split(/\r?\n/)
+          .map((line) => line.replace(/#.*/g, "").replace(/^nameserver\s+/gim, "").trim())
+          .filter(Boolean)
+          .filter((entry) => /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(entry)),
+      ))
       searchDomain = resolver.replace(/#.*/g, "").match(/^search\s+(.+)$/im)?.[1]?.trim().split(/\s+/)[0] || null
     }
   } catch {

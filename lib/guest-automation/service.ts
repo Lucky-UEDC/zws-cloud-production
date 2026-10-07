@@ -679,6 +679,11 @@ export class GuestAutomationService {
   /**
    * Run a plan. Steps execute in order; a failed step stops the sequence unless
    * the step is marked as independent.
+   *
+   * Transient QGA failures (agent starting, temporary network blip, guest reboot)
+   * are retried at the step level before giving up. This prevents a healthy
+   * Linux boot from being marked as permanently failed because the agent was
+   * still initializing a subsystem.
    */
   async executePlan(input: {
     plan: OperationPlan
@@ -733,7 +738,39 @@ export class GuestAutomationService {
         continue
       }
 
-      const outcome = await this.executeStep(runId, planned.operation, planned.template!, plan, actor)
+      // Retry the entire step for transient QGA failures. A Linux guest can
+      // temporarily lose agent connectivity while subsystems initialize, and
+      // a single retry often resolves it without human intervention.
+      const maxStepRetries = plan.detected.engine === "linux" ? 3 : 2
+      let stepAttempt = 0
+      let outcome: OperationOutcome | null = null
+      while (stepAttempt <= maxStepRetries) {
+        stepAttempt++
+        outcome = await this.executeStep(runId, planned.operation, planned.template!, plan, actor)
+        if (outcome.status === "success" || outcome.status === "already_applied") {
+          break
+        }
+        const isTransient = shouldRetryGuestError(outcome.errorCode as GuestErrorCode, stepAttempt)
+        if (!isTransient) break
+        // Brief delay before retrying the step; the agent usually recovers quickly.
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(stepAttempt)))
+      }
+
+      if (!outcome) {
+        outcome = {
+          operation: planned.operation,
+          status: "failed",
+          changed: false,
+          verified: false,
+          durationMs: 0,
+          attempts: 0,
+          errorCode: "GUEST_EXEC_FAILED",
+          error: "Step execution returned no outcome.",
+          commandMasked: planned.template?.command ?? null,
+          result: {},
+          rollbackStatus: "not-required",
+        }
+      }
       steps.push(outcome)
       if (this.persists) await this.persistStep(runId, outcome, plan)
 

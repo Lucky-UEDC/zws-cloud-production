@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { sendWhatsAppMessage } from "@/lib/whatsapp/queue"
 import { WHATSAPP_TEMPLATE_KEYS } from "@/lib/whatsapp/template-registry"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { badRequest, jsonError, noStoreHeaders, requireWhatsAppAdmin } from "../_shared"
 
 export const runtime = "nodejs"
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
     if (!message && !body.filePath) badRequest("Message or media is required.")
 
     const templateKey = text(body.templateKey) || WHATSAPP_TEMPLATE_KEYS.ADMIN_TEST
-    const brandName = await getBrandName().catch(() => "Cloud")
+    const brandName = await resolveBrandIdentity()
     const result = await sendWhatsAppMessage({
       to: phone,
       filePath: text(body.filePath) || undefined,

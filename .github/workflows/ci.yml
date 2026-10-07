@@ -68,13 +68,24 @@ jobs:
           FP="$(find . -path ./node_modules -prune -o -type f -print | sort | xargs sha256sum | sha256sum | cut -c1-12)"
           echo "fp=${FP}" >> "$GITHUB_OUTPUT"
 
+      # Deterministic, inspectable tag. The previous tag was a content hash,
+      # which is fine for caching but easy to get wrong: the build runs inside
+      # buildx, so with push=false nothing lands in the runner's local image
+      # store unless we ask for `load: true`. Without it, the following
+      # `docker image inspect` failed on a tag that genuinely did not exist,
+      # which is why this step was never green on any commit.
       - name: Build image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           target: runner
           push: false
-          tags: zws-cloud:${{ steps.fingerprint.outputs.fp }}
+          # `load` puts the built image into the runner's docker daemon so it
+          # can actually be inspected. Without this the inspect below is a
+          # lookup of a reference that was never created locally.
+          load: true
+          tags: zws-cloud:ci-${{ github.sha }}
           build-args: |
             APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'ci' }}
             APP_COMMIT=${{ github.sha }}
@@ -82,8 +93,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Verify the image exists locally
+        run: |
+          docker image inspect zws-cloud:ci-${{ github.sha }} > /dev/null
+          docker images zws-cloud:ci-${{ github.sha }}
+
       - name: Report image size
         run: |
-          SIZE="$(docker image inspect zws-cloud:${{ steps.fingerprint.outputs.fp }} --format='{{.Size}}')"
+          SIZE="$(docker image inspect zws-cloud:ci-${{ github.sha }} --format='{{.Size}}')"
           echo "image_size_bytes=${SIZE}"
-          echo "image_size_human=$(numfmt --to=iec $SIZE)"
+          echo "image_size_human=$(numfmt --to=iec "$SIZE")"

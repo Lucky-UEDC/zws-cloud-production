@@ -12,6 +12,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { readJsonResponse } from "@/lib/client/safe-json"
 import { startPaymentRedirect } from "@/lib/client/payment-redirect"
 import { formatCurrency } from "@/lib/currency-format"
+import { effectiveBackupLimit as planBackupLimit } from "@/lib/backups-retention-limit"
 import { toast } from "sonner"
 
 type BackupPlan = {
@@ -263,10 +264,14 @@ export default function ClientBackupPlansPage() {
                     <p className="mt-1 text-xs text-muted-foreground">+ GST {Number(plan.taxPercent || 0)}%</p>
                   </div>
                   <ul className="flex-1 space-y-1.5 text-sm">
-                    <li>{plan.maxBackups} backups kept</li>
+                    <li>{planBackupLimit(plan) == null ? "Unlimited backups kept" : `${planBackupLimit(plan)} backups kept`}</li>
                     <li>{plan.storageQuotaGb} GB storage quota</li>
                     <li>{plan.manualBackupEnabled ? "Manual backups" : "No manual backups"} · {plan.automaticBackupEnabled ? "automatic backups" : "no automatic backups"}</li>
-                    <li>Retention: latest {plan.retentionCount}</li>
+                    {/* One limit, not two. This plan used to advertise a kept-count *and* a
+                        separate retention figure, and the two disagreed whenever
+                        retention was the smaller. The number actually enforced is
+                        the stricter of the two, so it is the only one shown. */}
+                    <li>Oldest beyond the limit are pruned automatically</li>
                     <li>{plan.restoreEnabled ? "Restore included" : "Restore not included"}</li>
                     {plan.overageEnabled ? <li>Overage: {formatCurrency(plan.overagePricePerGb, plan.currency)}/GB</li> : <li>No overage billing</li>}
                     <li>Extra storage: {formatCurrency(plan.extraStoragePricePerGb, plan.currency)}/GB/mo</li>

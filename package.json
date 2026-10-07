@@ -27,6 +27,7 @@
     "seed:e2e": "tsx scripts/seed-e2e-users.ts",
     "seed:install-baseline": "tsx scripts/seed-install-baseline.ts",
     "seed:guest-templates": "tsx scripts/seed-guest-templates.ts",
+    "sync:guest-template-operations": "tsx scripts/sync-guest-template-operations.ts",
     "seed:billing-baseline": "tsx scripts/seed-billing-baseline.ts",
     "seed:turnstile": "tsx scripts/seed-turnstile-settings.ts",
     "seed:whatsapp-templates": "tsx prisma/seeds/whatsapp-templates.ts",

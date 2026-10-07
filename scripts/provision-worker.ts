@@ -18,6 +18,13 @@ const AUTO_RETRY_CODES = [
   "TEMPLATE_MISSING",
   "CLONE_FAILED",
   "NODE_UNAVAILABLE",
+  // Guest agent transient failures - a VM may boot but the agent takes time
+  // to initialize all subsystems. These are safe to retry automatically.
+  "GUEST_AGENT_TIMEOUT",
+  "GUEST_AGENT_UNREACHABLE",
+  "GUEST_AGENT_DISABLED",
+  "GUEST_EXEC_TIMEOUT",
+  "GUEST_EXEC_FAILED",
 ]
 const BLOCKED_JOB_MAX_AUTO_RETRIES = 5
 const BLOCKED_JOB_MIN_AGE_MS = 10 * 60_000 // only retry after stuck > 10 min

@@ -27,6 +27,7 @@ import { GUEST_ERROR_MESSAGES, type GuestErrorCode } from "./constants"
 import { isGuestAgentReachable } from "./os-detection"
 import type { DetectedOs } from "./os-detection"
 import type { ResolvedTemplate } from "./template-resolver"
+import { guestNative } from "./proxmox-guest"
 
 export type FirstBootRequest = {
   vms: {
@@ -245,11 +246,26 @@ export async function runFirstBoot(
     }
   }
 
-  // Past this point the agent answers, so the OS is knowable. Announced before
-  // the call because `firstBoot` does the detection internally and the customer
-  // should see the step turn over rather than sit on "detecting" while the whole
-  // configuration runs.
+  // The agent answered ping, but Linux subsystems (networking, filesystem,
+  // user database) may still be initializing. Confirm the agent can actually
+  // execute a native verb before proceeding — this catches the race where
+  // the channel is up but get-osinfo still fails.
   await onStage("DETECTING_OS", { attempt, waitedMs: now() - startedAt, maxWaitMs: waitMs })
+  const osInfo = await guestNative<{ id?: string; name?: string }>(
+    target,
+    "get-osinfo",
+    { timeoutMs: 5_000 },
+  ).catch(() => ({ ok: false as const }))
+  if (!osInfo.ok || !osInfo.data) {
+    return {
+      ok: false,
+      runId: null,
+      errorCode: "OS_DETECTION_UNAVAILABLE",
+      message: "Guest agent answered ping but OS detection failed. The guest may still be booting.",
+      detected: null,
+      template: null,
+    }
+  }
   await onStage("LOADING_OS_TEMPLATE", { attempt, waitedMs: now() - startedAt, maxWaitMs: waitMs })
   await onStage("CONFIGURING_NETWORK", { attempt, waitedMs: now() - startedAt, maxWaitMs: waitMs })
   await onStage("CONFIGURING_ACCESS", { attempt, waitedMs: now() - startedAt, maxWaitMs: waitMs })

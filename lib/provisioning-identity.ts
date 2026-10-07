@@ -22,7 +22,88 @@ function identityClient() {
   return (prisma as any).vmProvisioningIdentity
 }
 
-async function repairProvenStalePublicIp(input: { orderId: string; publicIp?: string | null }) {
+const TERMINAL_SERVICE_STATUSES = ["DELETED", "TERMINATED", "CANCELLED", "CANCELED"]
+
+function serviceIsGone(service: { status?: string | null; deletedAt?: Date | string | null } | null | undefined) {
+  if (!service) return true
+  if (service.deletedAt) return true
+  return TERMINAL_SERVICE_STATUSES.includes(String(service.status || "").toUpperCase())
+}
+
+/**
+ * Hand a unique address back when nothing is behind it any more.
+ *
+ * `public_ip` carries a unique index, so one identity row owns an address for
+ * as long as the row holds it. The repair below only ever handled the case where
+ * the old service was still alive but had demonstrably moved to a different
+ * address. It had no path for the far more common case: the service is gone.
+ * In production that leaked seven addresses from a /24 -- every one of them
+ * still carried an identity row for a service the panel had deleted -- and
+ * because `allocateIp` treats a dead service as a free address it kept handing
+ * those addresses out. Each one died at `ensureProvisioningIdentity` with a bare
+ * unique-constraint violation, *after* the guest had been cloned, resized and
+ * started, so a stale row cost a VM and produced a START_FAILED order.
+ *
+ * Releasing is guarded three ways: only a row whose service is definitively
+ * gone, never the current order's own row, and never while any live service or
+ * unreleased allocation still holds the address. The row itself is kept: it
+ * still locks the order to its VMID, which is what stops a second clone.
+ */
+async function releaseAbandonedPublicIp(input: { orderId: string; publicIp: string; vpsInstanceId?: string | null; conflict: any }) {
+  const { conflict } = input
+  const requestedIp = input.publicIp
+  if (!conflict || conflict.orderId === input.orderId) return
+  if (!serviceIsGone(conflict.vpsInstance)) return
+
+  // Somebody may still be serving this address even though the identity row's
+  // own service is gone. Never take an address a live service is using.
+  const liveService = await prisma.vpsInstance
+    .findFirst({
+      where: {
+        ipAddress: requestedIp,
+        deletedAt: null,
+        status: { notIn: TERMINAL_SERVICE_STATUSES },
+      },
+      select: { id: true },
+    })
+    .catch(() => null)
+  if (liveService) return
+
+  // Same for an allocation still held against a live service. The allocation
+  // this very order just took is excluded, or the repair would refuse to undo
+  // the collision it exists to undo.
+  const foreignOwner = input.vpsInstanceId ? { not: input.vpsInstanceId } : undefined
+  const liveAllocation = await (prisma as any).ipAllocation
+    .findFirst({
+      where: {
+        ipAddress: requestedIp,
+        releasedAt: null,
+        status: { in: ["assigned", "ASSIGNED", "used", "USED", "reserved", "RESERVED"] },
+        vpsInstance: { deletedAt: null, status: { notIn: TERMINAL_SERVICE_STATUSES }, ...(foreignOwner ? { id: foreignOwner } : {}) },
+      },
+      select: { id: true },
+    })
+    .catch(() => null)
+  if (liveAllocation) return
+
+  const metadata = conflict.metadata && typeof conflict.metadata === "object" && !Array.isArray(conflict.metadata)
+    ? conflict.metadata as Record<string, unknown>
+    : {}
+  await identityClient().update({
+    where: { id: conflict.id },
+    data: {
+      publicIp: null,
+      metadata: {
+        ...metadata,
+        publicIpReleasedAt: new Date().toISOString(),
+        publicIpReleaseReason: "owning_service_deleted_and_address_unclaimed",
+        releasedPublicIp: requestedIp,
+      },
+    },
+  })
+}
+
+async function repairProvenStalePublicIp(input: { orderId: string; publicIp?: string | null; vpsInstanceId?: string | null }) {
   const requestedIp = String(input.publicIp || "").trim()
   if (!requestedIp) return
 
@@ -48,9 +129,13 @@ async function repairProvenStalePublicIp(input: { orderId: string; publicIp?: st
   }).catch(() => null)
   if (!conflict || conflict.orderId === input.orderId) return
 
+  // The owning service is gone and nothing live holds the address: give it back
+  // before anything can fail on the unique index.
+  await releaseAbandonedPublicIp({ orderId: input.orderId, publicIp: requestedIp, vpsInstanceId: input.vpsInstanceId, conflict })
+
   const service = conflict.vpsInstance
   const currentIp = String(service?.ipAddress || "").trim()
-  const serviceActive = service && !service.deletedAt && !["DELETED", "TERMINATED", "CANCELLED", "CANCELED"].includes(String(service.status || "").toUpperCase())
+  const serviceActive = !serviceIsGone(service)
   const allocationProvesCurrentIp = Boolean(currentIp && service?.ipAllocations?.some((allocation: { ipAddress?: string | null }) => allocation.ipAddress === currentIp))
   if (!serviceActive || !allocationProvesCurrentIp || currentIp === requestedIp) return
 
@@ -87,7 +172,7 @@ export async function ensureProvisioningIdentity(input: {
   publicIp?: string | null
   macAddress?: string | null
 }) {
-  await repairProvenStalePublicIp(input)
+  await repairProvenStalePublicIp({ orderId: input.orderId, publicIp: input.publicIp, vpsInstanceId: input.vpsInstanceId })
   const existing = await identityClient().findUnique({ where: { orderId: input.orderId } })
   const vmUuid = String(input.vmUuid || input.vpsInstanceId || existing?.vmUuid || input.orderId)
   const nextVmid = Number(input.vmid || 0) > 0 ? Number(input.vmid) : null

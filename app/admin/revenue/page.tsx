@@ -262,7 +262,7 @@ export default function AdminRevenuePage() {
           <div>
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              ZWS FinOps Intelligence
+              FinOps Intelligence
             </div>
             <h1 className="mt-3 text-3xl font-semibold tracking-tight">Revenue Analytics</h1>
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">

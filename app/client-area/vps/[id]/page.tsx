@@ -167,18 +167,49 @@ function expiryStateOf(status?: VpsStatus | null) {
   return "active"
 }
 
+/**
+ * Metric freshness, expressed the way an operator thinks about it.
+ *
+ * The raw wire value is still `CURRENT` / `STALE` / `UNAVAILABLE` and stays
+ * internal to this module: the customer sees when the number was measured, not
+ * a transport-state badge. `neverMeasured` is the important distinction - it is
+ * the only case where we have nothing to show at all.
+ */
 function freshnessLabel(item?: { state?: string; lastUpdatedAt?: string | null }) {
   const state = String(item?.state || "UNAVAILABLE").toUpperCase()
-  const updated = item?.lastUpdatedAt ? formatDate(item.lastUpdatedAt, true) : "No live sample"
-  return { state, updated }
+  const stamp = item?.lastUpdatedAt ? String(item.lastUpdatedAt) : ""
+  const measuredAt = stamp && !Number.isNaN(new Date(stamp).getTime()) ? formatDate(stamp, true) : ""
+  if (!measuredAt) return { state, updated: "Not collected yet", neverMeasured: true }
+  if (state === "CURRENT") return { state, updated: `Updated ${measuredAt}`, neverMeasured: false }
+  return { state, updated: `Last recorded ${measuredAt}`, neverMeasured: false }
 }
 
-function diskFreshnessLabel(item: any) {
+/**
+ * Disk freshness. Same rule as every other metric: a number with a timestamp,
+ * or an honest "not collected yet". Never a stale badge.
+ *
+ * A stopped server keeps its last real sample, so "Last recorded ..." is the
+ * normal case there and is not a fault.
+ */
+function diskFreshnessLabel(item: any, running = false) {
   const f = item?.freshness || item
   const state = String(f?.state || "UNAVAILABLE").toUpperCase()
-  const checked = (f?.lastUpdatedAt || f?.checkedAt) ? formatDate((f?.lastUpdatedAt || f?.checkedAt)!, true) : "Never"
-  const src = f?.source || item?.source || "unknown"
-  return { state, checked, source: src, errorCode: f?.errorCode, error: f?.error }
+  const stamp = f?.lastUpdatedAt || f?.checkedAt || ""
+  const measuredAt = stamp && !Number.isNaN(new Date(stamp).getTime()) ? formatDate(String(stamp), true) : ""
+  const source = f?.source || item?.source || "unknown"
+  const sourceLabel = source === "guest-agent" || source === "template-collector" || source === "cached" || source === "guest-filesystem"
+    ? "measured inside the server"
+    : source === "last-known"
+      ? "last known value"
+      : "measured inside the server"
+  const checked = !measuredAt
+    ? "Not collected yet"
+    : state === "CURRENT"
+      ? running
+        ? `Last checked ${measuredAt} · ${sourceLabel}`
+        : `Last recorded before shutdown · ${measuredAt}`
+      : `Last recorded ${measuredAt} · ${sourceLabel}`
+  return { state, checked, source, neverMeasured: !measuredAt, errorCode: f?.errorCode, error: f?.error }
 }
 
 function metricUnavailable(item?: { state?: string; source?: string | null }) {
@@ -243,12 +274,21 @@ function stateOf(status?: VpsStatus | null) {
   return status ? "stopped" : "loading"
 }
 
+/**
+ * Customer-facing service state.
+ *
+ * Deliberately plain: the customer cares whether their server is usable. No
+ * `CURRENT` / `RUNNING` / `LIVE` transport vocabulary, and no `Provisioning`
+ * once the server exists - that was the original bug, where a server that was
+ * running and guest-verified still read "Provisioning" because of a stale order
+ * row. Power state is shown separately and labelled as such.
+ */
 function stateLabel(state: string) {
-  if (state === "running") return "Running"
+  if (state === "running") return "Active"
   if (state === "stopped") return "Stopped"
-  if (state === "provisioning") return "Provisioning"
+  if (state === "provisioning") return "Setting up"
   if (state === "suspended") return "Suspended"
-  if (state === "error") return "Error"
+  if (state === "error") return "Needs attention"
   return "Loading"
 }
 
@@ -301,7 +341,6 @@ export default function VPSControlPanel() {
   const bandwidthPercent = bandwidthIncluded > 0 ? Math.min(100, Math.max(0, (bandwidthTotal / bandwidthIncluded) * 100)) : 0
   const networkQuality = bandwidth?.throttled ? "Limited" : liveState === "offline" ? "Offline" : liveState === "connected" ? "Good" : "Checking"
   const bandwidthFreshness = freshnessLabel(bandwidth?.freshness)
-  const diskFreshness = diskFreshnessLabel(status?.diskUsage)
   const diskReadRate = latestMetric?.diskReadBytesRate || 0
   const diskWriteRate = latestMetric?.diskWriteBytesRate || 0
 
@@ -760,43 +799,36 @@ export default function VPSControlPanel() {
         <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="space-y-4">
             <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <ResourceCard title="CPU" icon={Gauge} value={isRunning ? metricUnavailable(status?.metricsFreshness?.cpu) ? "Monitoring unavailable" : formatPercent(status?.cpuPercent) : currentState === "provisioning" ? "Preparing server" : "Server offline"} subvalue={`${status?.resources?.cpuCores || status?.cpuCores || "-"} cores`} freshness={status?.metricsFreshness?.cpu} metricKey="cpuPercent" data={metricSeries} paused={!isRunning} accent="#22c55e" />
-              <ResourceCard title="RAM" icon={MemoryStick} value={isRunning ? metricUnavailable(status?.metricsFreshness?.memory) ? "Monitoring unavailable" : `${formatBytesDecimal(status?.ramUsedBytes, { fallback: "0 MB" })} / ${formatBytesDecimal(status?.ramTotalBytes, { fallback: "0 MB" })}` : currentState === "provisioning" ? "Preparing server" : "Server offline"} subvalue={isRunning && !metricUnavailable(status?.metricsFreshness?.memory) ? formatPercent(status?.ramPercent) : ""} freshness={status?.metricsFreshness?.memory} metricKey="ramPercent" data={metricSeries} paused={!isRunning} accent="#38bdf8" progress={status?.ramPercent} />
+              <ResourceCard title="CPU" icon={Gauge} value={metricUnavailable(status?.metricsFreshness?.cpu) ? "Not collected yet" : formatPercent(status?.cpuPercent)} subvalue={`${status?.resources?.cpuCores || status?.cpuCores || "-"} cores`} freshness={status?.metricsFreshness?.cpu} metricKey="cpuPercent" data={metricSeries} paused={!isRunning} accent="#22c55e" />
+              <ResourceCard title="RAM" icon={MemoryStick} value={metricUnavailable(status?.metricsFreshness?.memory) ? "Not collected yet" : `${formatBytesDecimal(status?.ramUsedBytes, { fallback: "0 MB" })} / ${formatBytesDecimal(status?.ramTotalBytes, { fallback: "0 MB" })}`} subvalue={!metricUnavailable(status?.metricsFreshness?.memory) ? formatPercent(status?.ramPercent) : ""} freshness={status?.metricsFreshness?.memory} metricKey="ramPercent" data={metricSeries} paused={!isRunning} accent="#38bdf8" progress={status?.ramPercent} />
               {(() => {
                 const du = status?.diskUsage
-                const fresh = du?.freshness
-                const unavailable = fresh?.state === "UNAVAILABLE"
+                const diskLabel = diskFreshnessLabel(du, isRunning)
                 const usedGb = du?.usedGb
                 const totalGb = du?.totalGb
                 const freeGb = du?.freeGb
+                // Disk usage is guest truth. If the guest has never reported,
+                // say so once. A stale sample still shows, labelled as last
+                // recorded - never zeroed and never called "offline".
+                const hasSample = usedGb !== null && usedGb !== undefined && !metricUnavailable(du)
                 return (
                   <ResourceCard
                     title="Disk"
                     icon={HardDrive}
-                    value={isRunning
-                      ? unavailable
-                        ? fresh?.error
-                          ? `${fresh.errorCode}: ${fresh.error}`
-                          : "Usage unavailable"
-                        : usedGb === null || usedGb === undefined
-                          ? "Usage unavailable"
-                          : `${formatGbDecimal(usedGb)} used`
-                      : currentState === "provisioning"
-                        ? "Preparing server"
-                        : "Server offline"}
-                    subvalue={isRunning && du?.reported
-                      ? `${freeGb === null || freeGb === undefined ? "Usage unavailable" : `${formatGbDecimal(freeGb, "0 GB")} free`} / ${formatGbDecimal(totalGb, "-")} · ${formatByteRateDecimal(diskReadRate)} read · ${formatByteRateDecimal(diskWriteRate)} write`
+                    value={hasSample ? `${formatGbDecimal(usedGb)} used` : "Not collected yet"}
+                    subvalue={hasSample
+                      ? `${formatGbDecimal(freeGb, "0 GB")} free of ${formatGbDecimal(totalGb, "-")} · ${formatByteRateDecimal(diskReadRate)} read · ${formatByteRateDecimal(diskWriteRate)} write`
                       : ""}
-                    freshness={du}
+                    freshness={{ ...diskLabel }}
                     metricKey="diskPercent"
                     data={metricSeries}
                     paused={!isRunning}
                     accent="#a78bfa"
-                    progress={du?.percent}
+                    progress={hasSample ? du?.percent : null}
                   />
                 )
               })()}
-              <ResourceCard title="Network" icon={BarChart3} value={isRunning ? metricUnavailable(status?.metricsFreshness?.network) || (!networkDownRate && !networkUpRate) ? "No traffic sample" : `${formatRateDecimal(networkDownRate)} down` : currentState === "provisioning" ? "Preparing server" : "Server offline"} subvalue={isRunning && !metricUnavailable(status?.metricsFreshness?.network) && (networkDownRate || networkUpRate) ? `${formatRateDecimal(networkUpRate)} up` : ""} freshness={status?.metricsFreshness?.network} metricKey="networkInBytesRate" data={metricSeries} paused={!isRunning} accent="#14b8a6" />
+              <ResourceCard title="Network" icon={BarChart3} value={metricUnavailable(status?.metricsFreshness?.network) ? "Not collected yet" : (!networkDownRate && !networkUpRate) ? `0 B down` : `${formatRateDecimal(networkDownRate)} down`} subvalue={!metricUnavailable(status?.metricsFreshness?.network) && (networkDownRate || networkUpRate) ? `${formatRateDecimal(networkUpRate)} up` : ""} freshness={status?.metricsFreshness?.network} metricKey="networkInBytesRate" data={metricSeries} paused={!isRunning} accent="#14b8a6" />
             </div>
 
             <div className="grid min-w-0 gap-4 md:grid-cols-3">
@@ -1071,29 +1103,20 @@ function ActionButton({ icon: Icon, label, onClick, busy, disabled }: { icon: an
   )
 }
 
-function ResourceCard({ title, icon: Icon, value, subvalue, freshness, data, metricKey, paused, accent = "#60a5fa", progress }: { title: string; icon: any; value: string; subvalue?: string; freshness?: any; data: MetricPoint[]; metricKey: string; paused?: boolean; accent?: string; progress?: number | null }) {
-  const isDisk = title === "Disk"
-  const fresh = isDisk ? diskFreshnessLabel(freshness) : freshnessLabel(freshness)
-  const current = fresh.state === "CURRENT"
-  const stale = fresh.state === "STALE"
-  const unavailable = fresh.state === "UNAVAILABLE"
-  const diskFresh = fresh as { state: string; checked?: string; source?: string; errorCode?: string | null; error?: string | null }
-  const metricFresh = fresh as { state: string; updated?: string }
+function ResourceCard({ title, icon: Icon, value, subvalue, freshness, data, metricKey, paused, accent = "#60a5fa", progress, note }: { title: string; icon: any; value: string; subvalue?: string; freshness?: any; data: MetricPoint[]; metricKey: string; paused?: boolean; accent?: string; progress?: number | null; note?: string }) {
+  const fresh = freshness as { checked?: string; updated?: string; errorCode?: string | null; error?: string | null; neverMeasured?: boolean }
+  const stamp = fresh?.checked || fresh?.updated || ""
   return (
     <Card className="overflow-hidden border-border/40 bg-background/80">
       <CardContent className="space-y-3 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm font-medium"><Icon className="h-4 w-4" style={{ color: accent }} />{title}</div>
-          <Badge variant="outline" className={current ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : stale ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-zinc-400/30 bg-zinc-400/10 text-zinc-200"}>
-            {fresh.state}
-          </Badge>
-        </div>
+        <div className="flex items-center gap-2 text-sm font-medium"><Icon className="h-4 w-4" style={{ color: accent }} />{title}</div>
         <div>
           <div className="text-lg font-semibold">{value}</div>
           {subvalue ? <div className="text-xs text-muted-foreground">{subvalue}</div> : null}
           <div className="text-xs text-muted-foreground">
-            {isDisk && diskFresh.checked ? `Last checked ${diskFresh.checked} (${diskFresh.source})` : metricFresh.updated ? `Last update ${metricFresh.updated}` : ""}
-            {unavailable && diskFresh.errorCode ? ` · ${diskFresh.errorCode}: ${diskFresh.error}` : ""}
+            {stamp}
+            {fresh?.errorCode ? ` · ${fresh.errorCode}` : ""}
+            {note ? ` · ${note}` : ""}
           </div>
         </div>
         {progress !== undefined && progress !== null ? <Progress value={Math.max(0, Math.min(100, Number(progress || 0)))} /> : null}
@@ -1106,7 +1129,9 @@ function ResourceCard({ title, icon: Icon, value, subvalue, freshness, data, met
 }
 
 function MiniChart({ data, metricKey, paused, color }: { data: MetricPoint[]; metricKey: string; paused?: boolean; color: string }) {
-  if (paused || !data.length) return <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border/40 text-xs text-muted-foreground">{paused ? "Server offline" : "No traffic sample"}</div>
+  // The chart is decorative. When there is nothing to plot, say that, rather
+  // than implying the server is offline.
+  if (paused || !data.length) return <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border/40 text-xs text-muted-foreground">{paused ? "Collecting after the server starts" : "No traffic sample yet"}</div>
   const values = data.slice(-42).map((point: any) => Number(point[metricKey] || 0))
   const clean = values.filter((value) => Number.isFinite(value))
   const max = Math.max(1, ...clean)
@@ -1149,9 +1174,9 @@ function StorageCard({ disk, status, running }: { disk: any; status: VpsStatus |
       <div className="mt-4 space-y-2">
         <div className="flex justify-between text-sm">
           <span className="text-muted-foreground">Usage</span>
-          <span>{status?.diskUsage?.reported ? `${running && used !== null && used !== undefined ? formatGbDecimal(used, "-") : "Usage unavailable"} / ${formatGbDecimal(total, "-")}` : running ? "Usage unavailable" : "Server offline"}</span>
+          <span>{status?.diskUsage?.reported && used !== null && used !== undefined ? `${formatGbDecimal(used, "-")} / ${formatGbDecimal(total, "-")}` : "Not collected yet"}</span>
         </div>
-        <Progress value={running && status?.diskUsage?.reported ? Math.max(0, Math.min(100, percent)) : 0} />
+        <Progress value={status?.diskUsage?.reported && used !== null && used !== undefined ? Math.max(0, Math.min(100, percent)) : 0} />
       </div>
     </div>
   )

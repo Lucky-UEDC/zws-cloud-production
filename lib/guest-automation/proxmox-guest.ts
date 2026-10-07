@@ -448,13 +448,21 @@ function sleep(ms: number) {
 /**
  * Retry policy for transient guest faults. Deliberately NOT applied to
  * dangerous filesystem operations — those must be re-run deliberately.
+ *
+ * Linux guests may need more time for the agent to fully initialize subsystems.
+ * Windows guests start a PowerShell host per exec and routinely need 10-40s
+ * to produce output through the QEMU guest agent. The delays are tuned for
+ * both: short enough to not delay a real failure, long enough to absorb
+ * transient agent startup hiccups.
  */
-export const GUEST_RETRY_DELAYS_MS = [2_000, 5_000, 15_000]
+export const GUEST_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000]
 
 const RETRYABLE_ERROR_CODES: ReadonlySet<GuestErrorCode> = new Set([
   "GUEST_AGENT_TIMEOUT",
   "GUEST_AGENT_UNREACHABLE",
+  "GUEST_AGENT_DISABLED",
   "GUEST_EXEC_TIMEOUT",
+  "GUEST_EXEC_FAILED",
 ])
 
 /** Only transient agent faults are retried. Parse/verify failures are not. */

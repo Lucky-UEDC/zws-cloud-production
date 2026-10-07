@@ -25,7 +25,10 @@ export function renderWhatsAppNotification(input: {
 }) {
   const { user, type, data } = input
   const name = firstLine(user.name, value(data, "userName"), "there")
-  const brand = firstLine(value(data, "brandName"), value(data, "company_name"), "Cloud")
+  // No hardcoded brand. "Cloud" was sent to customers as the company name whenever
+  // the caller did not pass one, which for an OTP or invoice message meant the
+  // message was signed by a product fragment rather than the operator.
+  const brand = firstLine(value(data, "brandName"), value(data, "company_name")) || "our team"
 
   if (type === "otp") {
     throw new Error("WhatsApp OTP sends must use approved authentication templates.")

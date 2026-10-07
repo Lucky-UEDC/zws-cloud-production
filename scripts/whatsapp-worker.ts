@@ -14,7 +14,7 @@ import {
 } from "@/lib/whatsapp/diagnostics"
 import { runScheduledWhatsAppAutomations } from "@/lib/whatsapp/automation"
 import { processWhatsAppCampaign, syncCampaignCounters } from "@/lib/whatsapp/campaigns"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import {
   getWhatsAppRedisConnection,
   WHATSAPP_AUTH_QUEUE,
@@ -180,7 +180,7 @@ async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, e
 
 async function processSendJob(job: Job<WhatsAppSendJob>, queueName: string) {
   const data = job.data
-  const brandName = await getBrandName().catch(() => "Cloud")
+  const brandName = await resolveBrandIdentity()
   await markJobProcessing(job, queueName)
   try {
     const rendered = data.templateKey

@@ -5,7 +5,7 @@ import { lifecycleDates } from "@/lib/renewals"
 import { normalizeVmAutomationState, normalizeVmLifecycleState } from "@/lib/vm-state-machine"
 import { formatBandwidthQuota } from "@/lib/bandwidth-format"
 import { bytesToDecimalGb, gbToBytesDecimal } from "@/lib/format-units"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { consoleModeLabel } from "@/lib/console-mode"
 import { getConsoleAccess, getConsoleSettings } from "@/lib/console-access"
 import { consoleModeForResolvedType, normalizeConsoleType, resolveConsoleType } from "@/lib/console-resolution"
@@ -590,7 +590,7 @@ export async function serializeClientVmStatus(vps: any) {
     vps.proxmoxNode?.nodeName &&
     !terminalStates.has(String(mapped.status || vps.status || "").toUpperCase())
   )
-  const brandName = await getBrandName().catch(() => "Cloud")
+  const brandName = await resolveBrandIdentity()
   const diskFreshness = hasCachedDiskUsage
     ? { state: "STALE", source: "cached", lastUpdatedAt: iso(vps.diskUsageCheckedAt) }
     : metricFreshness

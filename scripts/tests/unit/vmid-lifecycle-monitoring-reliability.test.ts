@@ -36,11 +36,12 @@ test("VM power fallback remains VMID-only and escalates shutdown stop kill", () 
   assert.doesNotMatch(source, /hostname/)
 })
 
-test("customer monitoring copy distinguishes running VM telemetry gaps from server offline", () => {
+test("customer monitoring copy distinguishes a telemetry gap from an offline server", () => {
   const status = read("app/api/client/vps/[id]/status/route.ts")
   const metrics = read("app/api/client/vps/[id]/metrics/route.ts")
   const truth = read("lib/vm-db-truth.ts")
   const page = read("app/client-area/vps/[id]/page.tsx")
+  // The API still distinguishes the two, and still reports it precisely.
   assert.doesNotMatch(status, /createProxmoxClient/)
   assert.match(truth, /Monitoring unavailable/)
   assert.match(truth, /Guest agent offline/)
@@ -48,9 +49,17 @@ test("customer monitoring copy distinguishes running VM telemetry gaps from serv
   assert.match(truth, /reported: diskUsageReported/)
   assert.doesNotMatch(metrics, /createProxmoxClient/)
   assert.match(truth, /UNAVAILABLE/)
-  assert.match(page, /Monitoring unavailable/)
-  assert.match(page, /No traffic sample/)
-  assert.match(page, /Usage unavailable/)
+
+  // The customer copy changed on purpose. "Monitoring unavailable",
+  // "Usage unavailable" and "No traffic sample" all read as faults on a
+  // perfectly healthy server whose last sample simply predates the poll, which
+  // is the complaint this release fixes. The API vocabulary above stays; the
+  // page now says when the number was measured, or that it was never measured.
+  assert.match(page, /Not collected yet/)
+  assert.match(page, /Last recorded/)
+  assert.doesNotMatch(page, /Monitoring unavailable/)
+  assert.doesNotMatch(page, /Usage unavailable/)
+  assert.doesNotMatch(page, /Server offline/)
   assert.doesNotMatch(page, /Not reported yet/)
 })
 

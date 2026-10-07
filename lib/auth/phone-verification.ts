@@ -5,7 +5,7 @@ import { normalizeStrictPhoneNumber } from "@/lib/phone-number"
 import { enqueueWhatsAppOtp } from "@/lib/whatsapp/queue"
 import { maskWhatsAppPhone, normalizeWhatsAppNumber } from "@/lib/whatsapp/format"
 import { WHATSAPP_TEMPLATE_KEYS } from "@/lib/whatsapp/template-registry"
-import { getBrandName } from "@/lib/settings/site-settings"
+import { resolveBrandIdentity } from "@/lib/brand-identity"
 import { extractClientIp } from "@/lib/request-context"
 import { createOtpCorrelationId, normalizeOtpError, WhatsAppOtpError } from "@/lib/whatsapp/otp-errors"
 import { writeWhatsAppQueueLog } from "@/lib/whatsapp/diagnostics"
@@ -220,7 +220,7 @@ export async function startSignupPhoneVerification(input: {
   })
 
   try {
-    const brandName = await getBrandName().catch(() => "Cloud")
+    const brandName = await resolveBrandIdentity()
     const job = await enqueueWhatsAppOtp({
       customerId: "",
       phone: normalized.phone,

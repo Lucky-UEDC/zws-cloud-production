@@ -4,6 +4,7 @@ import { listComputeNodes } from "@/lib/compute-node-monitoring"
 import { writeAuditLog } from "@/lib/audit-log"
 import { emitBackupLifecycleEvent } from "@/lib/notifications/backup-events"
 import { rebuildBackupUsage } from "@/lib/billing/entitlements"
+import { pruneBackupsToRetention } from "@/lib/backups-retention"
 
 export type BackupVmEntry = {
   vmid: number
@@ -340,6 +341,28 @@ export async function runVmBackupTask(input: {
       if (retention) console.log("[vm-backup] retention enforced", { backupId: row.id, policyId, vmid: Number(vmid), deleted: retention.deleted, kept: retention.kept })
     }
 
+    // Per-policy retention is scoped to one (schedule, vmid) pair. The limit the
+    // customer actually bought is scoped to the whole account, and usage is
+    // counted account-wide, so without this second pass an account with several
+    // VMs accumulates retention x VM-count backups and is then permanently
+    // blocked by a maxBackups check it can never get back under.
+    if (row.customerId) {
+      const accountRetention = await pruneBackupsToRetention(row.customerId).catch((e) => {
+        console.error(`[vm-backup] account retention failed: ${e?.message}`)
+        return null
+      })
+      if (accountRetention) {
+        console.log("[vm-backup] account retention enforced", {
+          backupId: row.id,
+          customerId: row.customerId,
+          limit: accountRetention.limit,
+          pruned: accountRetention.pruned.length,
+          unpruned: accountRetention.unpruned,
+          kept: accountRetention.keptCount,
+        })
+      }
+    }
+
     writeAuditLog({
       action: "vm.backup.completed",
       customerId: row.customerId,
@@ -573,19 +596,26 @@ export async function enforceVmBackupRetention(policyId: string, vmid: number, l
   const candidates = backups.filter((b) => trimIds.has(b.id))
 
   const client = proxmoxClientForNode(node)
-  let existing: Set<string> = new Set()
+  let existing: Set<string> | null = null
   try {
     const live = await client.listVmBackups(node.nodeName, policy.storage, { vmid: Number(vmid) })
     const list = Array.isArray(live) ? (live as any[]) : Array.isArray((live as any)?.data) ? (live as any).data : []
     existing = new Set(list.map((i: any) => String(i.volid || "")))
-  } catch {
-    existing = new Set()
+  } catch (error: any) {
+    // The listing is only an optimisation: it lets us skip rows whose archive is
+    // already gone so we do not error on a 404. It must never become a reason
+    // to prune nothing. Previously a failed listing left an empty set, every
+    // candidate then looked "not on storage", every candidate was skipped, and
+    // retention silently did nothing while still reporting success.
+    existing = null
+    console.error("[vm-backup] could not list existing archives; pruning by volid alone", { policyId, vmid: Number(vmid), error: error?.message })
   }
 
   const deleted: string[] = []
   for (const backup of candidates) {
     const volid = backup.backupPath || (backup.metadata as Record<string, unknown>)?.volid
-    if (volid && !existing.has(String(volid))) continue
+    // Only trust the "already gone" shortcut when the listing actually worked.
+    if (existing && volid && !existing.has(String(volid))) continue
     try {
       if (volid) await client.deleteVmBackup(node.nodeName, policy.storage, String(volid))
       await prisma.vmBackup.update({
@@ -597,7 +627,10 @@ export async function enforceVmBackupRetention(policyId: string, vmid: number, l
       console.error(`[vm-backup] retention delete failed for ${backup.id}: ${error?.message}`)
     }
   }
-  return { deleted, kept: selection.protectedCount + Math.max(0, backups.length - deleted.length) }
+  // `kept` is the number of completed backups this policy still holds for the
+  // VM. The previous expression added the protected count to the post-delete
+  // total, which double-counted every protected backup.
+  return { deleted, kept: Math.max(0, backups.length - deleted.length) }
 }
 
 export async function listBackupHistory(policyId?: string, vmid?: number, limit = 200): Promise<unknown[]> {
