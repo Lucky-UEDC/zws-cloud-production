@@ -393,7 +393,10 @@ export async function GET(request: Request) {
     checked("exchangeRates", 5000, exchangeRatesHealth),
     checked("googleDriveBackup", 2500, googleDriveBackupHealth),
     checked("analyticsIntegrations", 2500, analyticsIntegrationsHealth),
-    checked("whatsapp", 2500, getWhatsAppSessionStatus),
+    // Sized for the bounded Evolution probe (PROBE_EVOLUTION_TIMEOUT_MS per
+    // call, two calls deep). It is no longer in the `healthy` gate, so this
+    // budget only decides how much detail a warning carries.
+    checked("whatsapp", 8000, getWhatsAppSessionStatus),
     checked("pm2", 2500, pm2Health),
     checked("browserAutomation", 3000, browserAutomationHealth),
     checked("queues", 5000, queueHealth),
