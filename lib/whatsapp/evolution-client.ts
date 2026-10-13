@@ -17,7 +17,23 @@ export type EvolutionRequestOptions = {
   method?: string
   body?: unknown
   headers?: HeadersInit
+  /**
+   * How long to wait for this call before giving up.
+   *
+   * The default is deliberately generous: this client is also the production
+   * send path, and cutting a real message delivery short because an upstream
+   * was slow would be worse than waiting. Status probes pass a much shorter
+   * value via `testEvolutionConnection`, because a probe has no business
+   * holding a request open for a minute.
+   */
+  timeoutMs?: number
 }
+
+/** Bound applied when a caller does not choose one. Sized for real sends. */
+export const DEFAULT_EVOLUTION_TIMEOUT_MS = 30_000
+
+/** Bound applied to status probes, which only need to prove reachability. */
+export const PROBE_EVOLUTION_TIMEOUT_MS = 4_000
 
 export class EvolutionApiError extends Error {
   status: number
@@ -203,8 +219,12 @@ export class EvolutionClient {
 
   private async request(path: string, options: EvolutionRequestOptions = {}) {
     const url = `${this.baseUrl}${path.startsWith("/") ? path : `/${path}`}`
+    const timeoutMs = Math.max(500, Math.trunc(Number(options.timeoutMs) || DEFAULT_EVOLUTION_TIMEOUT_MS))
     let response: Response
     try {
+      // Every call is bounded. Without this a single unresponsive upstream left
+      // a fetch pending forever, and the health check inherited that hang
+      // because it probes several of these in sequence.
       response = await fetch(url, {
         method: options.method || "GET",
         headers: {
@@ -215,6 +235,7 @@ export class EvolutionClient {
         },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
       })
     } catch {
       const error = new Error("Evolution server unavailable")
@@ -237,29 +258,29 @@ export class EvolutionClient {
     return body
   }
 
-  getInfo() {
-    return this.request("/")
+  getInfo(options: EvolutionRequestOptions = {}) {
+    return this.request("/", options)
   }
 
-  async getVersion() {
-    const info: any = await this.getInfo()
+  async getVersion(options: EvolutionRequestOptions = {}) {
+    const info: any = await this.getInfo(options)
     return text(info?.version || info?.data?.version || info?.response?.version || info?.result?.version || "unknown")
   }
 
-  fetchInstances() {
-    return this.request("/instance/fetchInstances")
+  fetchInstances(options: EvolutionRequestOptions = {}) {
+    return this.request("/instance/fetchInstances", options)
   }
 
-  async findInstance(instanceId: string) {
-    const instances = await this.fetchInstances()
+  async findInstance(instanceId: string, options: EvolutionRequestOptions = {}) {
+    const instances = await this.fetchInstances(options)
     return { instances, instance: findEvolutionInstance(instances, instanceId) }
   }
 
-  connectionState(instance: string) {
-    return this.request(`/instance/connectionState/${encodeURIComponent(instance)}`)
+  connectionState(instance: string, options: EvolutionRequestOptions = {}) {
+    return this.request(`/instance/connectionState/${encodeURIComponent(instance)}`, options)
   }
 
-  setWebhook(instance: string, url: string, events: readonly EvolutionWebhookEvent[] = EVOLUTION_WEBHOOK_EVENTS) {
+  setWebhook(instance: string, url: string, events: readonly EvolutionWebhookEvent[] = EVOLUTION_WEBHOOK_EVENTS, options: EvolutionRequestOptions = {}) {
     const webhook = {
       enabled: true,
       url,
@@ -268,11 +289,13 @@ export class EvolutionClient {
       events: [...events],
     }
     return this.request(`/webhook/set/${encodeURIComponent(instance)}`, {
+      ...options,
       method: "POST",
       body: webhook,
     }).catch((error) => {
       if (isEvolutionApiError(error) && error.status === 400) {
         return this.request(`/webhook/set/${encodeURIComponent(instance)}`, {
+          ...options,
           method: "POST",
           body: { webhook },
         })
@@ -281,8 +304,8 @@ export class EvolutionClient {
     })
   }
 
-  findWebhook(instance: string) {
-    return this.request(`/webhook/find/${encodeURIComponent(instance)}`)
+  findWebhook(instance: string, options: EvolutionRequestOptions = {}) {
+    return this.request(`/webhook/find/${encodeURIComponent(instance)}`, options)
   }
 
   async sendText(instance: string, input: { number: string; text: string; delay?: number; linkPreview?: boolean }) {

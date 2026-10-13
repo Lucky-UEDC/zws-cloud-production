@@ -422,6 +422,21 @@ export async function GET(request: Request) {
   const dnsSslReport = dnsSsl.data as Awaited<ReturnType<typeof dnsSslHealth>> | undefined
   const ticketStorageReport = ticketStorage.data as Awaited<ReturnType<typeof ticketStorageHealth>> | undefined
   const whatsappRequired = queuesReport?.whatsappConfigured === true
+
+  /**
+   * WhatsApp is reported, not gated.
+   *
+   * An integration being slow or unreachable says nothing about whether the
+   * panel can serve a customer, and an external provider's latency was enough
+   * to turn the entire platform red. It is still measured and surfaced as a
+   * warning so the condition stays visible and alertable.
+   */
+  const whatsappWarning = (() => {
+    if (!whatsapp.ok) return "whatsapp status probe failed"
+    if (!whatsappReport?.connected) return "whatsapp session is not connected"
+    if (whatsappRequired && !whatsappReport?.workerHeartbeatFresh) return "whatsapp worker heartbeat is stale"
+    return null
+  })()
   const healthy = database.ok
     && schema.ok
     && schemaReport?.ok === true
@@ -441,7 +456,6 @@ export async function GET(request: Request) {
     && browserReport?.ok === true
     && queues.ok
     && queuesReport?.ok === true
-    && (!whatsappRequired || (whatsapp.ok && whatsappReport?.connected === true && whatsappReport?.workerHeartbeatFresh === true))
     && telemetry.ok
     && telemetryReport?.ok === true
     && cloudflareTunnel.ok
@@ -453,7 +467,9 @@ export async function GET(request: Request) {
 
   if (!wantsVerbose(request)) {
     return NextResponse.json(
-      { status: healthy ? "ok" : "degraded" },
+      // The warning rides along on every response so a monitor that only reads
+      // the status code can still alert on a broken integration.
+      { status: healthy ? "ok" : "degraded", ...(whatsappWarning ? { warning: whatsappWarning } : {}) },
       {
         status: healthy ? 200 : 503,
         headers: NO_CACHE_HEADERS,
@@ -464,6 +480,7 @@ export async function GET(request: Request) {
   return NextResponse.json(
     {
       status: healthy ? "ok" : "degraded",
+      warnings: whatsappWarning ? [whatsappWarning] : [],
       checkedAt: new Date().toISOString(),
       uptime: process.uptime(),
       database: {

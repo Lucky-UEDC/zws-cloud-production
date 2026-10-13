@@ -12,6 +12,14 @@ allowBuilds:
 
 overrides:
   axios: 1.18.0
+  # caniuse-lite is released several times a week. pnpm re-applies its 24h
+  # minimumReleaseAge policy by re-resolving every range on a cold cache, so a
+  # build cut within 24h of a caniuse-lite release fails on a dependency nobody
+  # asked to change.
+  #
+  # Pinned to the newest release past that window. browserslist (^1.0.30001810)
+  # and next (^1.0.30001579) both accept it, so nothing is downgraded.
+  caniuse-lite: 1.0.30001814
   esbuild: ^0.28.1
   form-data: ^4.0.6
   postcss: 8.5.23

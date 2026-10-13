@@ -23,7 +23,29 @@ test("PM2 probes survive release-directory replacement", () => {
   }
 })
 
-test("configured WhatsApp outages degrade aggregate platform health", () => {
+// A WhatsApp outage still has to be visible, but it must not decide whether the
+// whole platform is healthy: an external provider's latency was enough to turn
+// the entire panel red, which trains everyone to ignore the signal. It is
+// reported as a warning on both response shapes instead.
+//
+// The second assertion is the guard against over-correcting: the warning logic
+// has to still look at the session, the worker heartbeat and the probe result,
+// so a real outage cannot slip through unreported.
+test("configured WhatsApp outages are reported as a warning, not as platform health", () => {
+  const gateStart = healthRoute.indexOf("const healthy =")
+  const gateEnd = healthRoute.indexOf("if (!wantsVerbose", gateStart)
+  const gate = healthRoute.slice(gateStart, gateEnd)
+
+  assert.doesNotMatch(gate, /whatsapp\.ok/, "WhatsApp must not gate platform health")
+  assert.doesNotMatch(gate, /whatsappReport/)
+
   assert.match(healthRoute, /const whatsappRequired = queuesReport\?\.whatsappConfigured === true/)
-  assert.match(healthRoute, /!whatsappRequired \|\| \(whatsapp\.ok && whatsappReport\?\.connected === true && whatsappReport\?\.workerHeartbeatFresh === true\)/)
+  assert.match(healthRoute, /!whatsapp\.ok/, "the warning must consider a failed probe")
+  assert.match(healthRoute, /!whatsappReport\?\.connected/, "the warning must consider a disconnected session")
+  assert.match(healthRoute, /whatsappRequired && !whatsappReport\?\.workerHeartbeatFresh/, "a stale worker heartbeat must still be reported")
+
+  // Visible on both response shapes, so a monitor reading only the status code
+  // can still alert on it.
+  assert.match(healthRoute, /warning: whatsappWarning/)
+  assert.match(healthRoute, /warnings: whatsappWarning \? \[whatsappWarning\] : \[\]/)
 })

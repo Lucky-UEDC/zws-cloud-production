@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Lets a branch be re-verified on demand without pushing a dummy commit.
+  workflow_dispatch:
 
 permissions:
   contents: read

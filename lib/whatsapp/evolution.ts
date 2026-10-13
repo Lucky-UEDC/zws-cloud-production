@@ -10,6 +10,7 @@ import {
   findEvolutionInstance,
   isEvolutionApiError,
   normalizeEvolutionUrl,
+  PROBE_EVOLUTION_TIMEOUT_MS,
   sendIdentifierFromInstance,
   webhookEventsFromEvolution,
   webhookUrlFromEvolution,
@@ -200,10 +201,22 @@ export function assertEvolutionConfigured(settings: EvolutionSettings) {
   if (!settings.apiKey) throw new Error("Evolution API key is not configured.")
 }
 
+/**
+ * Probes our own public webhook URL.
+ *
+ * This is a request back through the proxy to ourselves, so it needs an
+ * explicit bound: if the app is saturated the self-call queues behind the very
+ * health check that issued it, and without a timeout the check waits on itself
+ * indefinitely.
+ */
 async function probeWebhook(url: string) {
   if (!url) return { ok: false, message: "Webhook URL is not configured." }
   try {
-    const response = await fetch(url, { method: "GET", cache: "no-store" })
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(PROBE_EVOLUTION_TIMEOUT_MS),
+    })
     return { ok: response.ok, message: response.ok ? "Webhook endpoint reachable." : "Webhook unreachable." }
   } catch {
     return { ok: false, message: "Webhook unreachable." }
@@ -252,32 +265,44 @@ export async function testEvolutionConnection(settingsInput?: EvolutionSettings,
   }
 
   const client = createEvolutionClient(settings)
-  let apiVersion = "unknown"
-  try {
-    apiVersion = await client.getVersion()
-    checks.push(check("api_reachable", "API reachable", true, `Evolution API is reachable${apiVersion !== "unknown" ? ` (version ${apiVersion})` : ""}.`))
-  } catch (error) {
-    checks.push(check("api_reachable", "API reachable", false, friendlyError(error)))
-  }
+  // A status probe only has to prove reachability, so it uses a short bound
+  // rather than the generous production-send timeout.
+  const probeOptions = { timeoutMs: PROBE_EVOLUTION_TIMEOUT_MS }
 
+  // Reachability and the instance lookup do not depend on each other, so they
+  // run together. Sequentially this cost the sum of every upstream round trip,
+  // which is what pushed the probe past the health check's budget.
+  let apiVersion = "unknown"
   let instances: unknown = null
   let instance: any = null
-  try {
-    const fetched = await client.findInstance(instanceId)
-    instances = fetched.instances
-    instance = fetched.instance
+
+  const [versionResult, instanceResult] = await Promise.allSettled([
+    client.getVersion(probeOptions),
+    client.findInstance(instanceId, probeOptions),
+  ])
+
+  if (versionResult.status === "fulfilled") {
+    apiVersion = versionResult.value
+    checks.push(check("api_reachable", "API reachable", true, `Evolution API is reachable${apiVersion !== "unknown" ? ` (version ${apiVersion})` : ""}.`))
+  } else {
+    checks.push(check("api_reachable", "API reachable", false, friendlyError(versionResult.reason)))
+  }
+
+  if (instanceResult.status === "fulfilled") {
+    instances = instanceResult.value.instances
+    instance = instanceResult.value.instance
     checks.push(check("api_key_valid", "API key valid", true, "Global API key accepted."))
     checks.push(check("instance_exists", "Instance exists", Boolean(instance), instance ? "Instance found." : "Instance not found."))
-  } catch (error) {
-    checks.push(check("api_key_valid", "API key valid", false, friendlyError(error)))
+  } else {
+    checks.push(check("api_key_valid", "API key valid", false, friendlyError(instanceResult.reason)))
     checks.push(check("instance_exists", "Instance exists", false, "Instance lookup failed."))
   }
 
   let connectionState = instance ? connectionStateFromInstance(instance) : ""
-  let sendInstance = instance ? sendIdentifierFromInstance(instance, instanceId) : instanceId
+  const sendInstance = instance ? sendIdentifierFromInstance(instance, instanceId) : instanceId
   if (instance) {
     try {
-      const stateBody: any = await client.connectionState(sendInstance)
+      const stateBody: any = await client.connectionState(sendInstance, probeOptions)
       connectionState = text(stateBody?.instance?.state || stateBody?.instance?.connectionStatus || stateBody?.state || stateBody?.connectionState || connectionState || "unknown").toLowerCase()
     } catch {
       connectionState = connectionState || "unknown"
@@ -290,20 +315,36 @@ export async function testEvolutionConnection(settingsInput?: EvolutionSettings,
     checks.push(check("real_send_accepted", "Real send accepted", options.realSendAccepted, options.realSendAccepted ? "Evolution accepted the real production test payload." : "Evolution did not accept a real production test payload."))
   }
 
+  // The webhook self-probe and the remote webhook lookup are independent, so
+  // they run together.
+  const webhookWork = (async () => {
+    if (!instance || !webhookUrl) return null
+    try {
+      if (options.registerWebhook) await client.setWebhook(sendInstance, webhookUrl, EVOLUTION_WEBHOOK_EVENTS, probeOptions)
+      return await client.findWebhook(sendInstance, probeOptions)
+    } catch {
+      return null
+    }
+  })()
+
   const webhookProbe = await probeWebhook(webhookUrl)
+  const webhook = await webhookWork
   checks.push(check("webhook_reachable", "Webhook reachable", webhookProbe.ok, webhookProbe.message))
 
-  let webhook: unknown = null
   let webhookConfigured = false
   if (instance && webhookUrl) {
     try {
-      if (options.registerWebhook) await client.setWebhook(sendInstance, webhookUrl)
-      webhook = await client.findWebhook(sendInstance)
-      const remoteUrl = webhookUrlFromEvolution(webhook)
-      const remoteEvents = webhookEventsFromEvolution(webhook)
-      const hasEvents = EVOLUTION_WEBHOOK_EVENTS.every((event) => remoteEvents.includes(event))
-      webhookConfigured = sameUrl(remoteUrl, webhookUrl) && hasEvents
-      checks.push(check("webhook_configured", "Webhook configured", webhookConfigured, webhookConfigured ? "Evolution webhook is configured." : "Evolution webhook is missing required URL or events."))
+      if (webhook) {
+        const remoteUrl = webhookUrlFromEvolution(webhook)
+        const remoteEvents = webhookEventsFromEvolution(webhook)
+        const hasEvents = EVOLUTION_WEBHOOK_EVENTS.every((event) => remoteEvents.includes(event))
+        webhookConfigured = sameUrl(remoteUrl, webhookUrl) && hasEvents
+        checks.push(check("webhook_configured", "Webhook configured", webhookConfigured, webhookConfigured ? "Evolution webhook is configured." : "Evolution webhook is missing required URL or events."))
+      } else {
+        // A null body means Evolution simply has no webhook registered, which
+        // is different from the API refusing the request.
+        checks.push(check("webhook_configured", "Webhook configured", false, "Evolution webhook could not be read from the API."))
+      }
     } catch (error) {
       checks.push(check("webhook_configured", "Webhook configured", false, friendlyError(error)))
     }
