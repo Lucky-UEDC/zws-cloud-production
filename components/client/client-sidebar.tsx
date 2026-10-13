@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { Activity, KeyRound, LayoutDashboard, Settings, ShieldCheck, CreditCard, Rocket, LifeBuoy, Wallet, Server, X, HardDriveDownload, Camera } from "lucide-react"
+import { Activity, KeyRound, LayoutDashboard, Settings, ShieldCheck, CreditCard, Rocket, LifeBuoy, Wallet, Server, X, HardDriveDownload, Camera, Gift } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const navItems = [
@@ -15,6 +15,7 @@ const navItems = [
   { label: "Snapshots", href: "/client-area/snapshots", icon: Camera },
   { label: "Billing", href: "/client-area/billing", icon: CreditCard },
   { label: "Wallet", href: "/client-area/wallet", icon: Wallet },
+  { label: "Referrals", href: "/client-area/referrals", icon: Gift },
   { label: "Activity", href: "/client-area/activity", icon: Activity },
   { label: "KYC", href: "/client-area/kyc", icon: ShieldCheck },
   { label: "Security", href: "/client-area/security/mfa", icon: ShieldCheck },

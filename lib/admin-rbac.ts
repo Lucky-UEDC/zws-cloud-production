@@ -208,10 +208,10 @@ export function canAccessAdminPath(role: string | null | undefined, pathname: st
   if (pathname === "/admin") return true
   if (normalized === "seo_agent" || normalized === "blog_writer") return isCmsOnlyPath(pathname)
   if (normalized === "support_agent") {
-    return pathname.startsWith("/admin/customers") || pathname.startsWith("/admin/support") || pathname.startsWith("/admin/logs") || pathname.startsWith("/admin/orders") || pathname.startsWith("/admin/invoices")
+    return pathname.startsWith("/admin/customers") || pathname.startsWith("/admin/support") || pathname.startsWith("/admin/logs") || pathname.startsWith("/admin/orders") || pathname.startsWith("/admin/invoices") || pathname.startsWith("/admin/referrals")
   }
   if (normalized === "billing_manager") {
-    return pathname.startsWith("/admin/invoices") || pathname.startsWith("/admin/payments") || pathname.startsWith("/admin/revenue") || pathname.startsWith("/admin/logs")
+    return pathname.startsWith("/admin/invoices") || pathname.startsWith("/admin/payments") || pathname.startsWith("/admin/revenue") || pathname.startsWith("/admin/referrals") || pathname.startsWith("/admin/logs")
   }
   if (normalized === "infrastructure_manager") {
     return pathname.startsWith("/admin/compute-nodes") || pathname.startsWith("/admin/vms") || pathname.startsWith("/admin/vm-backups") || pathname.startsWith("/admin/snapshots") || pathname.startsWith("/admin/ip-pools") || pathname.startsWith("/admin/provision-queue") || pathname.startsWith("/admin/proxmox") || pathname.startsWith("/admin/logs")

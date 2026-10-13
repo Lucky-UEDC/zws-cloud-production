@@ -193,7 +193,7 @@ function initialValues(geo: ResolvedLocation): Values {
   }
 }
 
-export function SignupForm({ initialGeo, nextTo = "" }: { initialGeo: ResolvedLocation; nextTo?: string }) {
+export function SignupForm({ initialGeo, nextTo = "", referralCode = "" }: { initialGeo: ResolvedLocation; nextTo?: string; referralCode?: string }) {
   const router = useRouter()
   const [values, setValues] = useState<Values>(() => initialValues(initialGeo))
   const [touched, setTouched] = useState<Partial<Record<keyof Values, boolean>>>({})
@@ -652,6 +652,7 @@ export function SignupForm({ initialGeo, nextTo = "" }: { initialGeo: ResolvedLo
           pinZip: values.pinZip,
           password: values.password,
           turnstileToken,
+          referralCode: referralCode || undefined,
         }),
       })
 

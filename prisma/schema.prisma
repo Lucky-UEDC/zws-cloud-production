@@ -158,6 +158,9 @@ model Customer {
   backupOverages            BackupOverage[]
   backupStorageUpgrades     BackupStorageUpgrade[]
   snapshotCharges           SnapshotCharge[]
+  referralAccount           ReferralAccount?
+  referralsMade             Referral[]         @relation("referrer_customer")
+  referralsReceived         Referral[]         @relation("referred_customer")
 
   @@unique([phoneNumber])
   @@index([email])
@@ -4457,6 +4460,9 @@ model BlockedIp {
   blockedUntil      DateTime? @map("blocked_until")
   unblockedAt       DateTime? @map("unblocked_at")
   unblockedBy       String?   @map("unblocked_by")
+  reviewStatus      String?   @map("review_status")
+  eventCount        Int       @default(0) @map("event_count")
+  riskScore         Int?      @map("risk_score")
   metadata          Json      @default("{}")
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
@@ -4465,6 +4471,7 @@ model BlockedIp {
   @@index([attackType, createdAt])
   @@index([deviceFingerprint])
   @@index([blockedUntil])
+  @@index([permanent, blockedUntil])
   @@map("blocked_ips")
 }
 
@@ -4499,6 +4506,9 @@ model SecurityEvent {
   id                String   @id @default(cuid())
   eventType         String   @map("event_type")
   severity          String   @default("info")
+  riskScore         Int?     @map("risk_score")
+  expiresAt         DateTime? @map("expires_at")
+  requestId         String?  @map("request_id")
   route             String?
   method            String?
   ip                String?
@@ -4519,6 +4529,9 @@ model SecurityEvent {
   @@index([deviceFingerprint, createdAt])
   @@index([customerId, createdAt])
   @@index([adminId, createdAt])
+  @@index([riskScore, createdAt])
+  @@index([expiresAt])
+  @@index([requestId])
   @@map("security_events")
 }
 
@@ -6231,4 +6244,199 @@ model Deployment {
 
   @@index([status, startedAt])
   @@map("deployments")
+}
+
+/// Referral programme: one row holds the live commission rule. Keeping the
+/// rule in a table (instead of a hardcoded constant) is what lets an operator
+/// change the percentage without a deploy, while every commission row still
+/// stores the rate that was actually applied to it.
+model ReferralProgram {
+  id                 String   @id @default(cuid())
+  name               String   @default("Default")
+  isActive           Boolean  @default(true) @map("is_active")
+  commissionPercent  Decimal  @default(10) @db.Decimal(5, 2) @map("commission_percent")
+  /// Days a commission stays "pending" after the qualifying transaction before
+  /// an operator may mark it paid. 0 means payable immediately.
+  holdDays           Int      @default(30) @map("hold_days")
+  /// Only transactions at least this large qualify for commission.
+  minimumOrderAmount Decimal  @default(0) @db.Decimal(12, 2) @map("minimum_order_amount")
+  /// When false the programme is visible but earns nothing.
+  allowSelfReferral  Boolean  @default(false) @map("allow_self_referral")
+  metadata           Json     @default("{}") @map("metadata")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("referral_programs")
+}
+
+/// One row per customer that can refer. The referral code lives here rather
+/// than on `customers` so the referral programme can be enabled without a
+/// migration on the hottest table in the schema.
+model ReferralAccount {
+  id          String   @id @default(cuid())
+  customerId  String   @unique @map("customer_id")
+  code        String   @unique
+  status      String   @default("active") // active | disabled
+  displayName String?  @map("display_name")
+  notes       String?
+  metadata    Json     @default("{}") @map("metadata")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  referrals  Referral[]  @relation("referrer_account")
+  commissions ReferralCommission[] @relation("referrer_commissions")
+
+  @@index([status])
+  @@index([code])
+  @@map("referral_accounts")
+}
+
+/// The referrer -> referred customer relationship. One row per referred
+/// customer: `referredCustomerId` is unique, which enforces first-touch
+/// attribution in the database instead of in application code.
+model Referral {
+  id                 String   @id @default(cuid())
+  referrerAccountId  String   @map("referrer_account_id")
+  referrerCustomerId String   @map("referrer_customer_id")
+  referredCustomerId String   @unique @map("referred_customer_id")
+  code               String
+  source             String   @default("link") // link | code | admin
+  status             String   @default("registered") // registered | converted | active | inactive | blocked
+  registeredAt       DateTime @default(now()) @map("registered_at")
+  firstPurchaseAt    DateTime? @map("first_purchase_at")
+  latestPurchaseAt   DateTime? @map("latest_purchase_at")
+  convertedAt        DateTime? @map("converted_at")
+  notes              String?
+  metadata           Json     @default("{}") @map("metadata")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  referrerAccount ReferralAccount @relation("referrer_account", fields: [referrerAccountId], references: [id], onDelete: Cascade)
+  referrer        Customer         @relation("referrer_customer", fields: [referrerCustomerId], references: [id], onDelete: Cascade)
+  referredCustomer Customer        @relation("referred_customer", fields: [referredCustomerId], references: [id], onDelete: Cascade)
+  commissions     ReferralCommission[]
+
+  @@index([referrerAccountId, registeredAt])
+  @@index([referrerCustomerId, registeredAt])
+  @@index([status])
+  @@index([registeredAt])
+  @@map("referrals")
+}
+
+/// One commission per qualifying order transaction. `orderId` is unique, so a
+/// renewal produces its own row instead of being folded into the first purchase
+/// (renewals are separate `orders` rows with `orderType = "renewal"`).
+model ReferralCommission {
+  id                 String    @id @default(cuid())
+  referralId         String    @map("referral_id")
+  orderId            String    @unique @map("order_id")
+  invoiceId          String?   @map("invoice_id")
+  referrerAccountId  String    @map("referrer_account_id")
+  referrerCustomerId String    @map("referrer_customer_id")
+  referredCustomerId String    @map("referred_customer_id")
+  productId          String?   @map("product_id")
+  serviceId          String?   @map("service_id")
+  kind               String    @default("initial") // initial | renewal
+  /// Eligible product amount AFTER discount and BEFORE GST. Commission is a
+  /// percentage of this, never of what the customer actually paid.
+  eligibleBaseAmount Decimal  @db.Decimal(12, 2) @map("eligible_base_amount")
+  gstAmount          Decimal  @default(0) @db.Decimal(12, 2) @map("gst_amount")
+  /// What the customer actually paid. Kept for display and audit only.
+  totalPaidAmount    Decimal  @default(0) @db.Decimal(12, 2) @map("total_paid_amount")
+  baseAmount         Decimal   @db.Decimal(12, 2) @map("base_amount")
+  ratePercent        Decimal   @db.Decimal(5, 2) @map("rate_percent")
+  amount             Decimal   @db.Decimal(12, 2)
+  currency           String    @default("INR")
+  status             String    @default("pending") // pending | paid | reversed | cancelled
+  earnedAt           DateTime  @map("earned_at")
+  holdUntil          DateTime? @map("hold_until")
+  paidAt             DateTime? @map("paid_at")
+  paidBy             String?   @map("paid_by")
+  reversedAt         DateTime? @map("reversed_at")
+  reversalReason     String?   @map("reversal_reason")
+  notes              String?
+  metadata           Json      @default("{}") @map("metadata")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  referral          Referral        @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  referrerAccount   ReferralAccount @relation("referrer_commissions", fields: [referrerAccountId], references: [id], onDelete: Cascade)
+
+  /// First-purchase policy: at most one `initial` commission per referral.
+  /// Enforced by the database, so a duplicate webhook or two workers racing
+  /// cannot both award it.
+  @@unique([referralId, kind])
+  @@index([referralId, status])
+  @@index([referrerCustomerId, earnedAt])
+  @@index([referredCustomerId, earnedAt])
+  @@index([status, earnedAt])
+  @@index([earnedAt])
+  @@index([productId])
+  @@map("referral_commissions")
+}
+
+/// Rolling risk state for one identity (session, device, or IP). Drives the
+/// "log -> score -> 30-minute temporary block" ladder. A permanent ban is not
+/// reachable from this table; `blockedUntil` always has an absolute expiry.
+model SecurityRiskState {
+  id                String    @id @default(cuid())
+  identityKey       String    @unique @map("identity_key")
+  score             Int       @default(0)
+  signalCount       Int       @default(0) @map("signal_count")
+  lastEventType     String?   @map("last_event_type")
+  lastIp            String?   @map("last_ip")
+  lastRoute         String?   @map("last_route")
+  lastMethod        String?   @map("last_method")
+  lastCustomerId    String?   @map("last_customer_id")
+  lastSessionIdHash String?   @map("last_session_id_hash")
+  lastRequestId     String?   @map("last_request_id")
+  blockedUntil      DateTime? @map("blocked_until")
+  windowStartedAt   DateTime  @default(now()) @map("window_started_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@index([identityKey])
+  @@index([blockedUntil])
+  @@index([score])
+  @@index([windowStartedAt])
+  @@map("security_risk_states")
+}
+
+/// A referral link being opened. This is NOT a customer: a click is a visit,
+/// and only a real signup becomes a referred account. Keeping them apart is
+/// what stops marketing numbers from looking like revenue.
+model ReferralVisit {
+  id                String    @id @default(cuid())
+  referralCode      String    @map("referral_code")
+  referrerAccountId String?   @map("referrer_account_id")
+  /// Hash of the first-party visitor cookie. Not the raw cookie, so a leak of
+  /// this table cannot be replayed as a visitor.
+  visitorId         String    @map("visitor_id")
+  landingPath       String    @default("/register") @map("landing_path")
+  referrerHeader    String?   @map("referrer_header")
+  userAgentHash     String?   @map("user_agent_hash")
+  ipHash            String?   @map("ip_hash")
+  country           String?
+  visitDay          DateTime  @map("visit_day")
+  visitedAt         DateTime  @default(now()) @map("visited_at")
+  /// The visit produced a real account.
+  registeredAt      DateTime? @map("registered_at")
+  /// That account went on to make a qualifying purchase. Strictly later than
+  /// `registeredAt`; a click alone never sets this.
+  convertedAt       DateTime? @map("converted_at")
+  customerId        String?   @map("customer_id")
+  metadata          Json      @default("{}") @map("metadata")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  /// One counted visit per code, per visitor, per day. Repeat opens and browser
+  /// retries collapse into the existing row instead of inflating the number.
+  @@unique([referralCode, visitorId, visitDay])
+  @@index([referrerAccountId, visitedAt])
+  @@index([referralCode, visitedAt])
+  @@index([customerId])
+  @@index([registeredAt])
+  @@index([convertedAt])
+  @@map("referral_visits")
 }

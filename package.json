@@ -32,6 +32,8 @@
     "seed:turnstile": "tsx scripts/seed-turnstile-settings.ts",
     "seed:whatsapp-templates": "tsx prisma/seeds/whatsapp-templates.ts",
     "seed:devil700": "tsx scripts/seed-devil700-coupon.ts",
+    "security:ban-probe": "tsx scripts/security-ban-probe.ts",
+    "security:reconcile-blocks": "tsx scripts/security-block-reconcile.ts",
     "seed:auth": "pnpm seed:admin && pnpm seed:demo-client",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",
@@ -134,7 +136,9 @@
     "console:audit": "tsx scripts/console-audit.ts",
     "console:repair": "tsx scripts/console-repair.ts",
     "console:validate:vnc": "tsx scripts/validate-panel-vnc.ts",
-    "console:validate:serial": "tsx scripts/validate-panel-serial.ts"
+    "console:validate:serial": "tsx scripts/validate-panel-serial.ts",
+    "verify:production": "tsx scripts/verify-production.ts",
+    "referral:first-purchase-probe": "tsx scripts/referral-first-purchase-probe.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",

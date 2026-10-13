@@ -6,6 +6,7 @@ import type React from "react"
 import { useEffect, useMemo, useState } from "react"
 import {
   Activity,
+  BadgeIndianRupee,
   BarChart3,
   Bot,
   Camera,
@@ -15,6 +16,7 @@ import {
   Database,
   FileText,
   FolderTree,
+  Gift,
   HardDrive,
   HardDriveDownload,
   ImageIcon,
@@ -104,6 +106,25 @@ const groups: NavGroup[] = [
     ],
   },
   {
+    label: "Referral Management",
+    icon: Gift,
+    items: [
+      {
+        label: "Referrals",
+        href: "/admin/referrals",
+        icon: Gift,
+        children: [
+          { label: "Overview", href: "/admin/referrals?tab=overview", icon: LayoutDashboard },
+          { label: "Referrers", href: "/admin/referrals?tab=referrers", icon: Users },
+          { label: "Referrals", href: "/admin/referrals?tab=referrals", icon: Gift },
+          { label: "Orders", href: "/admin/referrals?tab=orders", icon: ReceiptText },
+          { label: "Commissions", href: "/admin/referrals?tab=commissions", icon: BadgeIndianRupee },
+          { label: "Reports", href: "/admin/referrals?tab=reports", icon: BarChart3 },
+        ],
+      },
+    ],
+  },
+  {
     label: "Communication",
     icon: MessageCircle,
     items: [
@@ -169,6 +190,12 @@ function isActive(pathname: string, searchParams: URLSearchParams, href: string)
   if (href === "/admin/settings") return pathname === "/admin/settings" && !tab
   if (href === "/admin/customers?tab=wallets") return pathname === "/admin/customers" && tab === "wallets"
   if (href === "/admin/customers") return pathname === "/admin/customers" && tab !== "wallets"
+  if (path === "/admin/referrals") {
+    // Every referral sub-item lives on one path and is separated by ?tab=, so
+    // each one has to be compared against its own tab rather than the path.
+    const hrefTab = href.includes("tab=") ? href.split("tab=")[1] || "" : ""
+    return pathname === "/admin/referrals" && (hrefTab ? tab === hrefTab : !tab)
+  }
   if (path === "/admin") return pathname === "/admin"
   if (path === "/admin/cms") return pathname === "/admin/cms"
   if (path === "/admin/whatsapp") return pathname === "/admin/whatsapp"

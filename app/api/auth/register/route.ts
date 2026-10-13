@@ -15,6 +15,12 @@ import { findDuplicateAccount, rememberAccountIdentity } from "@/lib/account-dup
 import { markAttempt, requireRateLimit, requireTurnstile, securityGate } from "@/lib/security/forms"
 import { validateSecurityField } from "@/lib/security/input"
 import { rejectDetectedPayload } from "@/lib/security/abuse"
+import { captureReferral, type CaptureReferralResult } from "@/lib/referrals/attribution"
+import {
+  attributeSignupToVisit,
+  parseAttribution,
+  REFERRAL_ATTRIBUTION_COOKIE,
+} from "@/lib/referrals/visits"
 
 function maskEmail(email: string) {
   const [name = "", domain = ""] = String(email || "").split("@")
@@ -61,6 +67,7 @@ export async function POST(request: NextRequest) {
       postalCode?: string
       password?: string
       turnstileToken?: string
+      referralCode?: string
     }
 
     const captcha = await requireTurnstile(gate.ctx, body.turnstileToken, "register")
@@ -251,6 +258,32 @@ export async function POST(request: NextRequest) {
     })
     await rememberAccountIdentity({ email: customer.email, phone: customer.phone || verifiedPhone.phone }).catch(() => undefined)
     registerLog("db_create_completed", { email: maskEmail(customer.email), customerId: customer.id, phoneVerified: customer.phoneVerified })
+
+    // Referral attribution is best effort and must never fail a signup: the
+    // code is only a hint, the referred customer is the one we just created,
+    // and first-touch is enforced by the unique index on referred_customer_id.
+    const referralResult = await captureReferral({
+      referredCustomerId: customer.id,
+      code: String(body.referralCode || ""),
+      source: "link",
+      metadata: { source: "public_registration" },
+    }).catch((error) => {
+      console.error("[REGISTER] referral_capture_failed", error instanceof Error ? error.message : String(error))
+      return null as CaptureReferralResult | null
+    })
+    if (referralResult) registerLog("referral_attributed", { customerId: customer.id, status: referralResult.status })
+
+    // Link the tracked visit to the account it produced, so the funnel can
+    // separate clicks from real registrations. The visitor identity comes from
+    // the server-set httpOnly cookie, never from the request body.
+    await attributeSignupToVisit({
+      customerId: customer.id,
+      code: String(body.referralCode || ""),
+      visitorId: parseAttribution(request.cookies.get(REFERRAL_ATTRIBUTION_COOKIE)?.value)?.visitorId || null,
+    }).catch((error) => {
+      console.error("[REGISTER] referral_visit_link_failed", error instanceof Error ? error.message : String(error))
+      return { visitId: null, code: null }
+    })
 
     await Promise.allSettled([
       sendTemplateEmail({
