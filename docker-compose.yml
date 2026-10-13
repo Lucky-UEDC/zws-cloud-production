@@ -58,7 +58,7 @@ x-zws-service: &zws-service
     context: .
     target: runner
     args:
-      APP_VERSION: ${APP_VERSION:-1.1.0}
+      APP_VERSION: ${APP_VERSION:-1.2.0}
       APP_COMMIT: ${APP_COMMIT:-}
       APP_SOURCE_DATE: ${APP_SOURCE_DATE:-}
   image: zws-cloud:latest

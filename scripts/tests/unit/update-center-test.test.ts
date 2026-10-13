@@ -23,7 +23,10 @@ test("PART33 Dockerfile keeps the 3-stage multi-stage layout with no full-source
 
 test("PART33 build bakes immutable identity (version/commit/date) + image labels", () => {
   const dockerfile = read("Dockerfile")
-  assert.match(dockerfile, /ARG APP_VERSION=1\.1\.0/)
+  // The default must track package.json. Pinning a literal here meant every
+  // release bump failed a test that is only about the build wiring.
+  const version = (JSON.parse(read("package.json")) as { version: string }).version
+  assert.match(dockerfile, new RegExp(`ARG APP_VERSION=${version.replace(/\./g, "\\.")}`))
   assert.match(dockerfile, /ARG APP_COMMIT/)
   assert.match(dockerfile, /ARG APP_SOURCE_DATE/)
   assert.match(dockerfile, /runtime-info\.json/)
@@ -34,7 +37,8 @@ test("PART33 build bakes immutable identity (version/commit/date) + image labels
 
 test("PART33 compose passes build metadata args", () => {
   const compose = read("docker-compose.yml")
-  assert.match(compose, /APP_VERSION: \$\{APP_VERSION:-1\.1\.0\}/)
+  const version = (JSON.parse(read("package.json")) as { version: string }).version
+  assert.match(compose, new RegExp(`APP_VERSION: \\$\\{APP_VERSION:-${version.replace(/\./g, "\\.")}\\}`))
   assert.match(compose, /APP_COMMIT: \$\{APP_COMMIT:-\}/)
 })
 
@@ -47,9 +51,9 @@ test("PART33 dockerignore excludes audits, reports, uploads, logs", () => {
 
 // ------------- Part 13: versioning -------------
 
-test("PART13 package.json version is 1.1.0 and matches the Dockerfile default", () => {
+test("PART13 package.json version matches the Dockerfile default", () => {
   const pkg = JSON.parse(read("package.json")) as { version: string }
-  assert.equal(pkg.version, "1.1.0")
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/, "version must be semver")
   const dockerfile = read("Dockerfile")
   assert.match(dockerfile, new RegExp(`APP_VERSION=${pkg.version}`))
 })

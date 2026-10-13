@@ -28,7 +28,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 FROM deps AS build
 COPY . .
 ARG BUILD_DATABASE_URL=postgresql://zwscloud_app:zwscloud_app@127.0.0.1:5432/zwscloud?schema=public
-ARG APP_VERSION=1.1.0
+ARG APP_VERSION=1.2.0
 ARG APP_COMMIT=""
 ARG APP_SOURCE_DATE=""
 ENV APP_VERSION=${APP_VERSION} \
@@ -51,7 +51,7 @@ RUN APP_COMMIT_VALUE="${APP_COMMIT:-$(find /app -path /app/node_modules -prune -
 # ============================================================
 FROM node:22-bookworm AS runner
 ARG DEBIAN_FRONTEND=noninteractive
-ARG APP_VERSION=1.1.0
+ARG APP_VERSION=1.2.0
 ARG APP_COMMIT=""
 ARG APP_SOURCE_DATE=""
 LABEL org.opencontainers.image.title="ZWS Cloud" \
