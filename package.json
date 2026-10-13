@@ -225,7 +225,7 @@
     "react-phone-number-input": "^3.4.16",
     "react-resizable-panels": "^2.1.7",
     "recharts": "2.15.0",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "sonner": "^1.7.1",
     "speakeasy": "^2.0.0",
     "ssh2": "^1.17.0",
