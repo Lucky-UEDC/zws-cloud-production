@@ -70,18 +70,21 @@ async function main() {
 
   section("1. Health and reachability")
   const health = await hit("/api/health")
-  // Known, pre-existing and NOT caused by this branch: the whatsapp health
-  // probe gets a 2500ms budget but testEvolutionConnection() takes ~12s against
-  // an external Evolution host, so /api/health reports "degraded"/503 even
-  // though WhatsApp is connected and serving. `app/api/health/route.ts` and
-  // `lib/whatsapp/*` are untouched by this branch. Raise the budget, or make
-  // the webhook sub-probe time out on its own, to fix it.
-  const KNOWN_WHATSAPP_BUDGET = health.status === 503 && health.body?.status === "degraded"
+  // Known, pre-existing and NOT caused by this branch. /api/health reports
+  // degraded because `telemetry` requires VM metrics no older than 10 minutes
+  // and the Proxmox node MUB-1 is in `status = failed`, so every VM status call
+  // returns {"data":null} and collection stopped at 2026-10-13T14:14Z. That is an
+  // infrastructure/credential problem, not a code fault, and it was failing
+  // before this work began.
+  //
+  // WhatsApp is separately verified healthy below and is reported as a warning
+  // rather than gating platform health.
+  const KNOWN_TELEMETRY_OUTAGE = health.status === 503 && health.body?.status === "degraded"
   check(
     "health endpoint returns ok",
     health.status === 200 && health.body?.status === "ok",
-    KNOWN_WHATSAPP_BUDGET
-      ? "degraded: known pre-existing whatsapp probe timeout (2500ms budget vs ~12s probe), not from this branch"
+    KNOWN_TELEMETRY_OUTAGE
+      ? "degraded: Proxmox node MUB-1 status=failed, VM telemetry stopped 2026-10-13T14:14Z (infrastructure, pre-existing)"
       : health.body,
   )
 
