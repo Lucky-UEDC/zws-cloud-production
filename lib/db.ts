@@ -6,7 +6,7 @@
 
 import type { PrismaClient } from '@prisma/client'
 import { createRequire } from 'node:module'
-import { ensureDatabaseUrl } from '@/lib/db-url'
+import { ensureDatabaseUrl, guardDatabaseConnection } from '@/lib/db-url'
 
 const runtimeRequire = createRequire(import.meta.url)
 const SLOW_QUERY_MS = Number(process.env.DB_SLOW_QUERY_MS || 100)
@@ -39,6 +39,12 @@ function createPrismaClient(): PrismaClient | null {
     console.warn('[DB] PostgreSQL DB_* configuration missing - database operations will be disabled')
     return null
   }
+
+  // Every query in the process goes through this one constructor, so refusing
+  // here is what stops development from reading or writing a declared
+  // production database. URL resolution above it stays unguarded so that build
+  // tooling, which only reads a connection string, keeps working.
+  guardDatabaseConnection()
 
   const PrismaClientConstructor = loadPrismaClientConstructor()
   const client = new PrismaClientConstructor({

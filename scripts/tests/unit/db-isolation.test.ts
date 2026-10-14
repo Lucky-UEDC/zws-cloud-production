@@ -39,6 +39,28 @@ test("a target matching a declared production database is refused", () => {
   assert.ok(!verdict.detail.includes("s3cr3t-not-a-real-password"))
 })
 
+test("a build or CI database on a local address is not mistaken for production", () => {
+  // The project's own CI points at a disposable instance on 127.0.0.1 that
+  // happens to share the production database *name*. Name matching alone would
+  // refuse every build, so a local address is exempt.
+  const ci = evaluateDatabaseIsolation(baseEnv({
+    DATABASE_URL: "postgresql://zwscloud_app:pw@127.0.0.1:5432/zwscloud?schema=public",
+  }))
+  assert.equal(ci.ok, true, "a loopback database must not be refused on name alone")
+  assert.equal(ci.reason, "isolated")
+
+  assert.equal(evaluateDatabaseIsolation(baseEnv({ DATABASE_URL: "postgresql://u:p@localhost:5432/zwscloud" })).ok, true)
+  assert.equal(evaluateDatabaseIsolation(baseEnv({ DATABASE_URL: "postgresql://u:p@postgres:5432/zwscloud" })).ok, true)
+
+  // The exemption is not a loophole: declaring the host as production wins.
+  const declared = evaluateDatabaseIsolation(baseEnv({
+    DATABASE_URL: "postgresql://u:p@127.0.0.1:5432/zwscloud",
+    ZWS_PRODUCTION_DATABASE_HOSTS: "127.0.0.1",
+  }))
+  assert.equal(declared.ok, false)
+  assert.equal(declared.reason, "production_host_target")
+})
+
 test("a genuinely separate development database passes", () => {
   const verdict = evaluateDatabaseIsolation(baseEnv({
     DATABASE_URL: "postgresql://zwscloud_dev:s3cr3t-not-a-real-password@db.internal:5432/zwscloud_dev",
@@ -115,12 +137,41 @@ test("the diagnostic is redacted and safe to print at startup", () => {
   assert.equal(diagnostic.ok, false)
 })
 
+test("the guard has no dependencies, so it can always load", () => {
+  const source = readFileSync("lib/db-isolation.ts", "utf8")
+  // The guard consults db-url; if it also imported it, the two would form a
+  // cycle and the guard would fail to load in any context that resolves
+  // modules outside the bundler alias. It broke `next build` once already.
+  assert.doesNotMatch(source, /^import .*from ["'](?:@\/lib\/db-url|\.\/db-url)["']/m)
+  // db-url reaches it with a relative import for the same reason.
+  const urlSource = readFileSync("lib/db-url.ts", "utf8")
+  assert.match(urlSource, /import \{ assertDatabaseIsolation \} from "\.\/db-isolation"/)
+  assert.doesNotMatch(urlSource, /require\(["']@\/lib\/db-isolation/)
+})
+
 test("every database connection funnels through the guard", () => {
+  // The guard must sit on the connection path, not on URL resolution: a module
+  // that reads the connection string at import time is imported by `next build`
+  // while collecting page data, and must not fail the build there.
   const source = readFileSync("lib/db-url.ts", "utf8")
-  // ensureDatabaseUrl and assertDatabaseUrl are the only entry points the
-  // Prisma client uses, so both must be guarded.
-  assert.match(source, /export function ensureDatabaseUrl\(\)[\s\S]*?guardAgainstProductionTarget/)
-  assert.match(source, /export function assertDatabaseUrl\(\)[\s\S]*?guardAgainstProductionTarget/)
+  assert.match(source, /export function guardDatabaseConnection/)
+  // ensureDatabaseUrl/assertDatabaseUrl resolve a string and must not throw.
+  assert.match(source, /export function ensureDatabaseUrl\(\)[\s\S]{0,300}?resolveDatabaseUrlFromEnv\(\)/)
+  assert.doesNotMatch(source, /export function ensureDatabaseUrl\(\)[\s\S]{0,300}?assertDatabaseIsolation\(\)/)
+
+  // Every query goes through the single Prisma constructor, so that is where
+  // the check has to be.
+  const db = readFileSync("lib/db.ts", "utf8")
+  assert.match(db, /guardDatabaseConnection\(\)/)
+  const constructor = db.slice(db.indexOf("function createPrismaClient("), db.indexOf("return new PrismaClientConstructor"))
+  assert.ok(
+    constructor.indexOf("guardDatabaseConnection()") > -1,
+    "the Prisma client must be refused before it is constructed"
+  )
+  assert.ok(
+    constructor.indexOf("guardDatabaseConnection()") < constructor.indexOf("loadPrismaClientConstructor()"),
+    "the guard must run before the client is built"
+  )
 
   // The migrate entrypoint must refuse before prisma runs.
   const entrypoint = readFileSync("docker-entrypoint.sh", "utf8")

@@ -93,27 +93,29 @@ export function sanitizePostgresUrlForPgDump(raw: string) {
   }
 }
 
+// Relative, not the `@/` alias: this module is loaded by contexts that do not
+// register the bundler's path alias (the Next config loader among them).
+import { assertDatabaseIsolation } from "./db-isolation"
+
 /**
- * Assert the resolved target is not a declared production database.
+ * Refuse to open a connection to a declared production database.
  *
- * Every database connection in the process funnels through `ensureDatabaseUrl`,
- * so guarding here is what makes the check impossible to forget at a call
- * site. Read-only callers that legitimately need to inspect configuration
- * should use `resolveDatabaseUrlFromEnv` directly.
+ * The guard lives on the connection path, not on URL resolution. Reading a
+ * connection string is pure string handling and happens legitimately during
+ * `next build`, where every route module is imported to collect page data; a
+ * module that reads the URL at import time must not fail the build. Creating a
+ * client, deploying a migration or restoring data all genuinely reach the data,
+ * and those are the operations that must be refused.
  */
-function guardAgainstProductionTarget(url: string) {
-  // Imported lazily to keep this module free of a cycle: db-isolation resolves
-  // its target through this file.
-  const { assertDatabaseIsolation } = require("@/lib/db-isolation") as typeof import("@/lib/db-isolation")
+export function guardDatabaseConnection() {
   assertDatabaseIsolation()
-  return url
 }
 
 export function ensureDatabaseUrl(): string {
   const resolved = resolveDatabaseUrlFromEnv()
   if (resolved.configured) {
     process.env.DATABASE_URL = resolved.url
-    return guardAgainstProductionTarget(resolved.url)
+    return resolved.url
   }
   return ""
 }
@@ -124,5 +126,5 @@ export function assertDatabaseUrl(): string {
     throw new Error(`PostgreSQL DATABASE_URL or DB_* configuration is incomplete: ${resolved.missing.join(", ")}`)
   }
   process.env.DATABASE_URL = resolved.url
-  return guardAgainstProductionTarget(resolved.url)
+  return resolved.url
 }

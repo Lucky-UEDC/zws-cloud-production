@@ -1,6 +1,3 @@
-import "dotenv/config"
-import { resolveDatabaseUrlFromEnv } from "@/lib/db-url"
-
 /**
  * Development / production database isolation guard.
  *
@@ -16,7 +13,49 @@ import { resolveDatabaseUrlFromEnv } from "@/lib/db-url"
  * connected. Production identity is declared explicitly via environment
  * variables, and any connection whose target matches a declared production
  * identity is refused unless an operator overrides it deliberately.
+ *
+ * This module deliberately imports nothing. It is the thing `lib/db-url.ts`
+ * consults, so depending on `lib/db-url` would make the guard part of the
+ * cycle it is supposed to protect, and would break any context that loads the
+ * URL resolver outside the bundler's alias handling (the Next config loader
+ * among them). A guard that cannot load is a guard that does not run.
  */
+
+const POSTGRES_SCHEMES = new Set(["postgresql:", "postgres:", "pgsql:"])
+
+/**
+ * Mirror of the resolution order in `lib/db-url.ts`, implemented here so this
+ * module stays self-contained. If that order ever changes, both must change
+ * together; `tests/unit/db-isolation.test.ts` pins that they still agree.
+ */
+function resolveTargetUrl(env: NodeJS.ProcessEnv): { url: string; missing: string[] } {
+  const read = (key: string) => String(env[key] || "").trim()
+  const configured = read("DATABASE_URL")
+  if (configured) return { url: configured, missing: [] }
+
+  const missing: string[] = []
+  const connection = read("DB_CONNECTION").toLowerCase()
+  const host = read("DB_HOST")
+  const port = read("DB_PORT") || "5432"
+  const database = read("DB_DATABASE")
+  const username = read("DB_USERNAME")
+  const password = env.DB_PASSWORD || ""
+  const schema = read("DB_SCHEMA") || "public"
+
+  if (!connection) missing.push("DB_CONNECTION")
+  else if (!POSTGRES_SCHEMES.has(`${connection}:`)) missing.push("DB_CONNECTION=postgresql")
+  if (!host) missing.push("DB_HOST")
+  if (!database) missing.push("DB_DATABASE")
+  if (!username) missing.push("DB_USERNAME")
+  if (!password) missing.push("DB_PASSWORD")
+  if (missing.length) return { url: "", missing }
+
+  const url = new URL(`postgresql://${host}:${port}/${database}`)
+  url.username = username
+  url.password = password
+  url.searchParams.set("schema", schema)
+  return { url: url.toString(), missing: [] }
+}
 
 export type ResolvedDatabaseTarget = {
   configured: boolean
@@ -36,11 +75,12 @@ export type ResolvedDatabaseTarget = {
  * of this type so it cannot be logged by accident.
  */
 export function describeResolvedDatabaseTarget(env: NodeJS.ProcessEnv = process.env): ResolvedDatabaseTarget {
-  const resolved = resolveDatabaseUrlFromEnv(env)
-  if (!resolved.configured || !resolved.url) {
+  const resolved = resolveTargetUrl(env)
+  const configured = Boolean(resolved.url)
+  if (!configured) {
     return {
       configured: false,
-      source: resolved.source,
+      source: resolved.missing.length ? "missing" : "missing",
       protocol: "",
       host: "",
       port: "",
@@ -53,7 +93,7 @@ export function describeResolvedDatabaseTarget(env: NodeJS.ProcessEnv = process.
     const url = new URL(resolved.url)
     return {
       configured: true,
-      source: resolved.source,
+      source: String(env.DATABASE_URL || "").trim() ? "database-url" : "db-fields",
       protocol: url.protocol.replace(":", ""),
       host: url.hostname,
       port: url.port || "5432",
@@ -65,7 +105,7 @@ export function describeResolvedDatabaseTarget(env: NodeJS.ProcessEnv = process.
     // An unparseable URL is itself a reason to refuse, so report it honestly.
     return {
       configured: false,
-      source: resolved.source,
+      source: "database-url",
       protocol: "",
       host: "",
       port: "",
@@ -98,6 +138,25 @@ export function productionDatabaseNames(env: NodeJS.ProcessEnv = process.env) {
 /** Hosts that are known to serve production. Empty means "no host restriction". */
 export function productionDatabaseHosts(env: NodeJS.ProcessEnv = process.env) {
   return new Set(csv(env.ZWS_PRODUCTION_DATABASE_HOSTS))
+}
+
+/** Hosts that are definitionally not a production database server. */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "0.0.0.0", "host.docker.internal", "postgres", "db", "mysql", "mariadb"])
+
+/**
+ * True when the host cannot be production.
+ *
+ * A loopback or in-network service address is a build, CI or throwaway
+ * database by construction. Without this exemption the guard would refuse the
+ * project's own CI, which points at a disposable PostgreSQL instance on
+ * 127.0.0.1. It is not a loophole: production is reached over a routable
+ * address, and an operator who really does declare a local host in
+ * `ZWS_PRODUCTION_DATABASE_HOSTS` is still caught, because an explicit
+ * production-host declaration always wins over this exemption.
+ */
+function isLocalHost(host: string) {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "")
+  return LOCAL_HOSTS.has(normalized) || normalized.endsWith(".local")
 }
 
 export type IsolationVerdict = {
@@ -151,8 +210,10 @@ export function evaluateDatabaseIsolation(env: NodeJS.ProcessEnv = process.env):
 
   const database = target.database.toLowerCase()
   const host = target.host.toLowerCase()
-  const hitsProductionName = productionDatabaseNames(env).has(database)
+  // An explicit production-host declaration always wins, including for a local
+  // address, so an operator can still pin one down.
   const hitsProductionHost = productionDatabaseHosts(env).has(host)
+  const hitsProductionName = productionDatabaseNames(env).has(database) && (!isLocalHost(host) || hitsProductionHost)
   const refused = hitsProductionName || hitsProductionHost
 
   const overrideRequested = csv(env.ZWS_ALLOW_PRODUCTION_DATABASE_ACCESS).includes("1") ||
@@ -168,13 +229,15 @@ export function evaluateDatabaseIsolation(env: NodeJS.ProcessEnv = process.env):
     return {
       ...base,
       ok: overrideRequested,
-      // Report which rule actually matched: "wrong database on the right host"
-      // and "right database on the wrong host" need different fixes.
+      // Report which rule actually matched, preferring the explicit host
+      // declaration because it is the more specific and more actionable fact:
+      // "wrong database on the right host" and "right database on the wrong
+      // host" need different fixes.
       reason: overrideRequested
         ? "override_active"
-        : hitsProductionName
-          ? "production_database_target"
-          : "production_host_target",
+        : hitsProductionHost
+          ? "production_host_target"
+          : "production_database_target",
       detail: overrideRequested
         ? `REFUSED BY DEFAULT BUT OVERRIDDEN: ${detail}. Development is writing to a production database.`
         : `${detail}. Refusing to open a write-capable connection. Point development at its own database, or set ZWS_ALLOW_PRODUCTION_DATABASE_ACCESS=1 only if this is genuinely the production host.`,
