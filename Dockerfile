@@ -108,7 +108,7 @@ COPY --from=build --chown=zws:nodejs /app/next.config.mjs /app/tsconfig.json /ap
 COPY --chown=zws:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
 ENV ZWS_PG_DUMP_BIN=/usr/lib/postgresql/18/bin/pg_dump \
     ZWS_PG_RESTORE_BIN=/usr/lib/postgresql/18/bin/pg_restore \
-    ZWS_PSQL_BIN=/usr/lib/postgresql/18/bin/psql \
+    ZWS_PSQL_BIN=/usr/lib/postgresql/18/bin/psql
 RUN chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /app/logs /app/backups /app/deployment-reports /app/uploads \
     && chown -R zws:nodejs /app/logs /app/backups /app/deployment-reports /app/uploads
