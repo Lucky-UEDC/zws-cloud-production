@@ -104,7 +104,6 @@ export function sanitizePostgresUrlForPgDump(raw: string) {
 function guardAgainstProductionTarget(url: string) {
   // Imported lazily to keep this module free of a cycle: db-isolation resolves
   // its target through this file.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { assertDatabaseIsolation } = require("@/lib/db-isolation") as typeof import("@/lib/db-isolation")
   assertDatabaseIsolation()
   return url
