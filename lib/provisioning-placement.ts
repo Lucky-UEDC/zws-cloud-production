@@ -192,14 +192,6 @@ async function latestCapacitySnapshot(nodeId: string): Promise<NodeCapacitySnaps
   })
 }
 
-function capacityBlockReason(capacity: NodeCapacitySnapshot | null, _ramThresholdPercent: number, requiredRamGb: number) {
-  if (!capacity || capacity.stale) return null
-  if (capacity.ramFreeGb !== null && Number.isFinite(capacity.ramFreeGb)) {
-    return capacity.ramFreeGb > requiredRamGb ? null : `Insufficient RAM available on target node (${capacity.ramFreeGb.toFixed(1)}GB free, ${requiredRamGb}GB required)`
-  }
-  return null
-}
-
 /**
  * Sum of RAM already promised to VMs on a node.
  *
