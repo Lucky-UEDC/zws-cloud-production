@@ -59,6 +59,23 @@ type Manifest = {
   uploads?: { root: string; available: boolean; files: Array<{ path: string; bytes: number; sha256: string }> }
 }
 
+/**
+ * PostgreSQL client binaries.
+ *
+ * The container ships a client that may predate the server's major version,
+ * which is the outage documented in the issue report. Deployment sets
+ * `ZWS_PG_DUMP_BIN` (and the restore counterpart) to the absolute path of
+ * the versioned binaries installed beside the application, so multiple clients
+ * can coexist without one shadowing the other. Without the override the
+ * PATH-resolved binary is used, unchanged from the previous behaviour.
+ *
+ * The variables are read at call time rather than at module load so that unit
+ * tests and preflight scripts can point them at a test double.
+ */
+function pgDumpBin() { return String(process.env.ZWS_PG_DUMP_BIN || "pg_dump").trim() || "pg_dump" }
+function pgRestoreBin() { return String(process.env.ZWS_PG_RESTORE_BIN || "pg_restore").trim() || "pg_restore" }
+function psqlBin() { return String(process.env.ZWS_PSQL_BIN || "psql").trim() || "psql" }
+
 function passphrase() {
   const value = String(process.env.ZWS_BACKUP_ENCRYPTION_PASSPHRASE || "").trim()
   if (!value) {
@@ -72,6 +89,25 @@ function passphrase() {
 
 function encryptionKey() {
   return crypto.createHash("sha256").update(passphrase()).digest()
+}
+
+function lockPath() { return path.join(requireDirectory(), ".platform-backup-running") }
+function acquireBackupLock() {
+  const file = lockPath()
+  try {
+    const prior = JSON.parse(fs.readFileSync(file, "utf8"))
+    const started = new Date(prior.startedAt).getTime()
+    const stale = !prior || !started || Date.now() - started > 2 * 60 * 60 * 1000
+    if (!stale) throw new Error(`Another backup is already running (started ${prior.startedAt}, pid ${prior.pid}). Refusing to overlap.`)
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") {
+      if (error?.message?.startsWith("Another backup is already running")) throw error
+    }
+  }
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 })
+}
+function releaseBackupLock() {
+  fs.rmSync(lockPath(), { force: true })
 }
 
 function requireDirectory() {
@@ -160,7 +196,7 @@ export function parsePgMajorVersion(output: string) {
 }
 
 async function assertClientSupportsServer() {
-  const clientRaw = await execFileAsync("pg_dump", ["--version"]).then((result) => String(result.stdout))
+  const clientRaw = await execFileAsync(pgDumpBin(), ["--version"]).then((result) => String(result.stdout))
   const clientMajor = parsePgMajorVersion(clientRaw)
   if (!clientMajor) {
     // Failing closed: an undetectable client version means the guard cannot do
@@ -172,7 +208,7 @@ async function assertClientSupportsServer() {
   }
 
   const serverMajor = await execFileAsync(
-    "psql",
+    psqlBin(),
     [sanitizePostgresUrlForPgDump(process.env.DATABASE_URL || ""), "-tAc", "SHOW server_version_num"],
     { maxBuffer: 1024 * 1024 }
   )
@@ -219,6 +255,10 @@ async function uploadsManifest() {
 async function create() {
   const source = describeResolvedDatabaseTarget()
   if (!source.configured) throw new Error("No database is configured, so there is nothing to back up.")
+  // Prevent two scheduled runs from writing the same plain path or racing on the
+  // encryption key. The process supervision also avoids overlaps, but a hung
+  // job or two ad-hoc invocations must not corrupt a critical backup.
+  acquireBackupLock()
   const versions = await assertClientSupportsServer()
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-")
@@ -227,7 +267,7 @@ async function create() {
   const plainPath = path.join(requireDirectory(), `.plain-${stamp}.dump`)
 
   try {
-    await execFileAsync("pg_dump", [sanitizePostgresUrlForPgDump(process.env.DATABASE_URL || ""), "--format=custom", "--compress=6", "--no-owner", "--no-privileges", "-f", plainPath], {
+    await execFileAsync(pgDumpBin(), [sanitizePostgresUrlForPgDump(process.env.DATABASE_URL || ""), "--format=custom", "--compress=6", "--no-owner", "--no-privileges", "-f", plainPath], {
       maxBuffer: 1024 * 1024 * 32,
     })
 
@@ -262,7 +302,8 @@ async function create() {
     // The plaintext dump is unencrypted customer data. It must be removed on
     // every path, including a failed run: a version mismatch or a full disk
     // must not leave readable records sitting in the backup directory.
-    fs.rmSync(plainPath, { force: true })
+    try { fs.rmSync(plainPath, { force: true }) } catch { /* ignored */ }
+    releaseBackupLock()
   }
 }
 
@@ -293,7 +334,7 @@ async function verify(fileName?: string) {
     if (plainSha256 !== manifest.plainSha256) {
       throw new Error(`Decrypted digest mismatch for ${manifest.fileName}.`)
     }
-    const listed = await execFileAsync("pg_restore", ["-l", plainPath], { maxBuffer: 1024 * 1024 * 64 })
+    const listed = await execFileAsync(pgRestoreBin(), ["-l", plainPath], { maxBuffer: 1024 * 1024 * 64 })
     const entries = String(listed.stdout).split("\n").filter((line) => line.trim() && !line.trim().startsWith(";"))
     const tables = entries.filter((line) => /\bTABLE\b|\bTABLE DATA\b/.test(line)).length
     return {
@@ -351,34 +392,44 @@ async function restore() {
   const plainPath = path.join(requireDirectory(), `.restore-${manifest.fileName.replace(/[^a-zA-Z0-9.-]/g, "_")}.dump`)
   try {
     await decryptFile(artifactPath(manifest.fileName), plainPath, manifest.iv, manifest.tag)
-    await execFileAsync("pg_restore", ["--no-owner", "--no-privileges", "--dbname", target, plainPath], { maxBuffer: 1024 * 1024 * 64 })
+    await execFileAsync(pgRestoreBin(), ["--no-owner", "--no-privileges", "--dbname", target, plainPath], { maxBuffer: 1024 * 1024 * 64 })
     return { ok: true, restoredFrom: manifest.fileName, target: `${proposed.database}@${proposed.host}:${proposed.port}` }
   } finally {
     fs.rmSync(plainPath, { force: true })
   }
 }
 
-function prune() {
+async function prune() {
   const keepDays = Number(flag("keep-days") || process.env.ZWS_BACKUP_RETENTION_DAYS || DEFAULT_RETENTION_DAYS)
   const keep = Number(flag("keep") || process.env.ZWS_BACKUP_KEEP || DEFAULT_KEEP)
   const manifests = listManifests()
   const cutoff = Date.now() - keepDays * 24 * 60 * 60 * 1000
+
+  // Identify the newest artifact that still verifies, and refuse to prune it.
+  // Retention is never allowed to delete the last known-good verified backup,
+  // no matter how old or misconfigured the policy is.
+  let protectedFile: string | null = null
+  for (const manifest of manifests) {
+    try { await verify(manifest.fileName); protectedFile = manifest.fileName; break } catch { /* not verified, try next */ }
+  }
+
   const removed: string[] = []
   const kept: string[] = []
 
-  manifests.forEach((manifest, index) => {
+  for (const [index, manifest] of manifests.entries()) {
     const expired = new Date(manifest.createdAt).getTime() < cutoff
     // Retention never removes every artifact: the newest `keep` are always
     // kept, so a misconfigured retention value cannot destroy the last copy.
-    if (index < keep || (!expired && index < keep + 50)) {
+    // The last verified backup is protected from policy-driven removal as well.
+    if (manifest.fileName === protectedFile || index < keep || (!expired && index < keep + 50)) {
       kept.push(manifest.fileName)
-      return
+      continue
     }
     fs.rmSync(artifactPath(manifest.fileName), { force: true })
     fs.rmSync(manifestPath(manifest.fileName), { force: true })
     removed.push(manifest.fileName)
-  })
-  return { ok: true, kept: kept.length, removed }
+  }
+  return { ok: true, protectedBackup: protectedFile, kept: kept.length, removed }
 }
 
 /**
@@ -386,6 +437,23 @@ function prune() {
  * scheduler or uptime check notices. Never marks an unhealthy state healthy.
  */
 async function health() {
+  // 1. Backup-client compatibility. A newer server cannot be dumped by an
+  //    older client; prove the installed client reaches it before anything else.
+  try { await assertClientSupportsServer() } catch (error: any) {
+    return { ok: false, reason: "client_too_old", detail: error?.message || String(error) }
+  }
+
+  // 2. Free disk space. A backup that cannot fit must be reported rather than
+  //    silently aborting halfway and leaving a partial artifact.
+  try {
+    const stat = fs.statfsSync(requireDirectory())
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize)
+    const minFree = Number(process.env.ZWS_BACKUP_MIN_FREE_BYTES || 1 * 1024 * 1024 * 1024)
+    if (freeBytes < minFree) {
+      return { ok: false, reason: "low_disk", detail: `Only ${freeBytes} bytes free under ${minFree} required.`, freeBytes, minFree }
+    }
+  } catch { /* statfs unavailable on the target platform; skip gracefully */ }
+
   const manifests = listManifests()
   const maxAgeHours = Number(process.env.ZWS_BACKUP_MAX_AGE_HOURS || 24)
   if (!manifests.length) {
@@ -418,7 +486,7 @@ async function main() {
     case "restore":
       return restore()
     case "prune":
-      return prune()
+      return await prune()
     case "health":
       return health()
     default:

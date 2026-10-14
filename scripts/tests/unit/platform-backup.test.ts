@@ -61,7 +61,7 @@ test("integrity verification proves more than a successful exit code", () => {
   assert.match(body, /cipherSha256 !== manifest\.cipherSha256/)
   assert.match(body, /decryptFile\(encryptedPath, plainPath, manifest\.iv, manifest\.tag\)/)
   assert.match(body, /plainSha256 !== manifest\.plainSha256/)
-  assert.match(body, /execFileAsync\("pg_restore", \["-l", plainPath\]/)
+  assert.match(body, /execFileAsync\(pgRestoreBin\(\), \["-l", plainPath\]/)
 })
 
 test("a restore refuses to overwrite the configured database", () => {
@@ -72,11 +72,17 @@ test("a restore refuses to overwrite the configured database", () => {
   assert.match(body, /ZWS_ALLOW_RESTORE_IN_DEVELOPMENT/)
 })
 
+test("retention never removes the last verified backup", () => {
+  const body = source.slice(source.indexOf("async function prune("), source.indexOf("async function health("))
+  assert.match(body, /protectedFile/)
+  assert.match(body, /try \{ await verify\(manifest\.fileName\)/)
+})
+
 test("retention cannot delete every artifact", () => {
   const body = source.slice(source.indexOf("function prune("), source.indexOf("async function health("))
   // The newest `keep` are always retained regardless of age, so a wrong
   // retention value cannot destroy the last recoverable copy.
-  assert.match(body, /if \(index < keep \|\| \(!expired && index < keep \+ 50\)\)/)
+  assert.match(body, /if \(manifest\.fileName === protectedFile \|\| index < keep \|\| \(!expired && index < keep \+ 50\)\)/)
   // Defaults are declared at module scope, not inside prune().
   assert.match(source, /const DEFAULT_RETENTION_DAYS = 14/)
   assert.match(source, /const DEFAULT_KEEP = 10/)

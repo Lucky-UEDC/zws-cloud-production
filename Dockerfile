@@ -77,11 +77,16 @@ RUN apt-get update \
        chromium \
        curl \
        dumb-init \
+       gnupg \
        openssl \
-       postgresql-client \
        rclone \
        redis-tools \
        tini \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-18 \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
     && addgroup --system --gid 1001 nodejs \
@@ -101,6 +106,9 @@ COPY --from=build --chown=zws:nodejs /app/app ./app
 COPY --from=build --chown=zws:nodejs /app/components ./components
 COPY --from=build --chown=zws:nodejs /app/next.config.mjs /app/tsconfig.json /app/prisma.config.ts ./
 COPY --chown=zws:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
+ENV ZWS_PG_DUMP_BIN=/usr/lib/postgresql/18/bin/pg_dump \
+    ZWS_PG_RESTORE_BIN=/usr/lib/postgresql/18/bin/pg_restore \
+    ZWS_PSQL_BIN=/usr/lib/postgresql/18/bin/psql \
 RUN chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /app/logs /app/backups /app/deployment-reports /app/uploads \
     && chown -R zws:nodejs /app/logs /app/backups /app/deployment-reports /app/uploads
