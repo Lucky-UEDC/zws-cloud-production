@@ -4,6 +4,11 @@ import http from "node:http"
 import https from "node:https"
 import tls from "node:tls"
 import { decryptSecretValue, isEncryptedSecret } from "@/lib/secret-crypto"
+import {
+  assertProxmoxTestModeHostIsNotProduction,
+  isProxmoxTestMode,
+  ProxmoxTestCluster,
+} from "@/lib/proxmox-test-double"
 
 export const PROXMOX_NODE_TIMEOUT_MS = 5000
 export const PROXMOX_STORAGE_TIMEOUT_MS = 5000
@@ -1657,9 +1662,67 @@ class ProxmoxClient {
   }
 }
 
+/**
+ * Build a client whose transport is an in-memory cluster.
+ *
+ * Substituting `requestWithStatus` is enough to cover every method on the
+ * client, because `request` and all public helpers delegate to it. Nothing in
+ * this path opens a socket, which is what makes a provisioning test safe to
+ * run against code that would otherwise clone, restart or delete real VMs.
+ */
+export function createTestProxmoxClient(cluster: ProxmoxTestCluster, options: ProxmoxClientOptions = {}): ProxmoxClient {
+  const client = new ProxmoxClient(`https://${cluster.node}.invalid:8006`, "test@pam!testtoken", "test-secret", {
+    ...options,
+    logRequests: false,
+  })
+  client.requestWithStatus = async <T>(endpoint: string, method = "GET", body?: any): Promise<ProxmoxResponse<T>> => {
+    const response = cluster.handle({ endpoint, method, body })
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw proxmoxErrorForHttpStatus(response.statusCode, endpoint, response.data)
+    }
+    return { data: (response.data && typeof response.data === "object" && "data" in response.data
+      ? (response.data as { data: T }).data
+      : response.data) as T, statusCode: response.statusCode }
+  }
+  return client
+}
+
 export function createProxmoxClient(host: string, tokenId: string, tokenSecret: string, options: ProxmoxClientOptions = {}): ProxmoxClient {
+  // Test mode is checked before anything else so an accidentally configured
+  // development environment can never reach live infrastructure through a test.
+  if (isProxmoxTestMode()) {
+    assertProxmoxTestModeHostIsNotProduction(host)
+    const nodeName = String(host || "").replace(/^https?:\/\//, "").replace(/:.*$/, "") || "mocknode"
+    return createTestProxmoxClient(activeTestCluster(), { ...options, allowEmptyHost: true })
+  }
   const decryptedSecret = isEncryptedSecret(tokenSecret) ? decryptSecretValue(tokenSecret) : tokenSecret
   return new ProxmoxClient(host, tokenId, decryptedSecret, options)
+}
+
+export type { ProxmoxFakeOptions, ProxmoxFakeVm, RecordedCall } from "@/lib/proxmox-test-double"
+export {
+  ProxmoxTestCluster,
+  assertProxmoxTestModeHostIsNotProduction,
+  isMutatingProxmoxRequest,
+  isProxmoxTestMode,
+} from "@/lib/proxmox-test-double"
+
+let sharedTestCluster: ProxmoxTestCluster | null = null
+
+/**
+ * Process-wide cluster used when `ZWS_INFRA_TEST_MODE` is on.
+ *
+ * Tests that need specific topology call `setProxmoxTestCluster` instead, so
+ * state cannot leak between cases.
+ */
+export function activeTestCluster(): ProxmoxTestCluster {
+  if (!sharedTestCluster) sharedTestCluster = new ProxmoxTestCluster()
+  return sharedTestCluster
+}
+
+export function setProxmoxTestCluster(cluster: ProxmoxTestCluster | null) {
+  sharedTestCluster = cluster
+  return cluster
 }
 
 export const proxmox = createProxmoxClient(

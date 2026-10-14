@@ -36,7 +36,8 @@ function withPoolLimits(rawUrl: string): string {
   }
 }
 
-export function resolveDatabaseUrlFromEnv(): DbUrlResolution {
+export function resolveDatabaseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): DbUrlResolution {
+  const readEnv = (key: string) => String(env[key] || "").trim()
   const configuredDatabaseUrl = readEnv("DATABASE_URL")
   if (configuredDatabaseUrl) {
     return {
@@ -52,7 +53,7 @@ export function resolveDatabaseUrlFromEnv(): DbUrlResolution {
   const port = readEnv("DB_PORT") || "5432"
   const database = readEnv("DB_DATABASE")
   const username = readEnv("DB_USERNAME")
-  const password = process.env.DB_PASSWORD || ""
+  const password = env.DB_PASSWORD || ""
   const schema = readEnv("DB_SCHEMA") || "public"
 
   const missing: string[] = []
@@ -92,11 +93,28 @@ export function sanitizePostgresUrlForPgDump(raw: string) {
   }
 }
 
+/**
+ * Assert the resolved target is not a declared production database.
+ *
+ * Every database connection in the process funnels through `ensureDatabaseUrl`,
+ * so guarding here is what makes the check impossible to forget at a call
+ * site. Read-only callers that legitimately need to inspect configuration
+ * should use `resolveDatabaseUrlFromEnv` directly.
+ */
+function guardAgainstProductionTarget(url: string) {
+  // Imported lazily to keep this module free of a cycle: db-isolation resolves
+  // its target through this file.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { assertDatabaseIsolation } = require("@/lib/db-isolation") as typeof import("@/lib/db-isolation")
+  assertDatabaseIsolation()
+  return url
+}
+
 export function ensureDatabaseUrl(): string {
   const resolved = resolveDatabaseUrlFromEnv()
   if (resolved.configured) {
     process.env.DATABASE_URL = resolved.url
-    return resolved.url
+    return guardAgainstProductionTarget(resolved.url)
   }
   return ""
 }
@@ -107,5 +125,5 @@ export function assertDatabaseUrl(): string {
     throw new Error(`PostgreSQL DATABASE_URL or DB_* configuration is incomplete: ${resolved.missing.join(", ")}`)
   }
   process.env.DATABASE_URL = resolved.url
-  return resolved.url
+  return guardAgainstProductionTarget(resolved.url)
 }

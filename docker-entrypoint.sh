@@ -149,6 +149,11 @@ seed_uploads() {
 case "${1:-app}" in
   migrate)
     prepare_runtime
+    # Refuse to run schema changes when this host is not pointed at a database
+    # that is explicitly not production. A migration executed from a
+    # development host against the shared `main` database is unrecoverable
+    # without a verified backup, which is why this runs before anything else.
+    ./node_modules/.bin/tsx scripts/assert-db-isolation.ts "prisma migrate deploy" || exit 78
     if database_is_fresh; then
       bootstrap_fresh_database
     fi
