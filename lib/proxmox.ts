@@ -451,10 +451,16 @@ function headersForRequest(tokenId: string, tokenSecret: string, contentType?: s
 }
 
 function errorMessageForStatus(status: number, fallback?: unknown): string {
-  const safeDetail = proxmoxDetailText(fallback)
-  if (safeDetail && safeDetail !== "{}") return safeDetail
+  // A detail that carries no actual message - Proxmox answers a rejected token
+  // with the body `{"data":null}` - must not mask the status. Returning that
+  // body as the error message is what made a failed MUB-1 poll surface to an
+  // administrator as the literal text `{"data":null}` instead of naming the
+  // authentication failure. Status-specific wording is checked first.
   if (status === 401) return "Unauthorized token"
   if (status === 403) return "Permission denied"
+  const safeDetail = proxmoxDetailText(fallback)
+  // `{}` and `{"data":null}` stringify fine but say nothing actionable.
+  if (safeDetail && safeDetail !== "{}" && !/^\{\s*"data"\s*:\s*null\s*\}$/.test(safeDetail)) return safeDetail
   if (status === 404) return "Proxmox API endpoint not found"
   return "Proxmox API error"
 }

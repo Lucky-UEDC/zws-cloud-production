@@ -9,6 +9,8 @@ import { safeJson } from "@/lib/safe-json"
 import { resolveStoragePoolForPurchase } from "@/lib/storage-pools"
 import { provisionBlocked } from "@/lib/compute-node-monitoring"
 import { guestAgentChannelOpen } from "@/lib/proxmox-agent-flag"
+import { evaluateDiskAllocation, evaluateRamAllocation, type NodeResourcePolicy } from "@/lib/node-resource-policy"
+import { readNodeResourcePolicy } from "@/lib/node-resource-policy-store"
 
 const MIN_SAFE_VMID = 100
 const MAX_SAFE_VMID = 999999
@@ -198,6 +200,43 @@ function capacityBlockReason(capacity: NodeCapacitySnapshot | null, _ramThreshol
   return null
 }
 
+/**
+ * Sum of RAM already promised to VMs on a node.
+ *
+ * This is the "allocated" side of the allocation policy, counted once per
+ * instance from `vps_instances.ramGb` - the same field the order flow uses to
+ * size a VM - so a pending request is always compared against the commitment
+ * that was actually recorded, not against live memory pressure. Using live free
+ * RAM here is what made placement flap: a node that was merely busy looked full
+ * and orders stalled behind it.
+ *
+ * Deliberately keyed on instance rows rather than on the metric sample so the
+ * figure does not drift between telemetry updates.
+ */
+async function allocatedRamForNode(nodeId: string) {
+  const rows = await (prisma as any).vpsInstance.findMany({
+    where: { proxmoxNodeId: nodeId },
+    select: { ramGb: true, status: true },
+  }).catch(() => [] as Array<{ ramGb?: number | null; status?: string | null }>)
+  if (!Array.isArray(rows)) return 0
+  return Number(rows.reduce((total, row) => total + (Number(row?.ramGb) || 0), 0).toFixed(2))
+}
+
+/** Sum of logical disk already promised on a storage pool, in GB. */
+async function allocatedDiskForPool(nodeId: string, storageId: string) {
+  const rows = await (prisma as any).vpsInstance.findMany({
+    where: { proxmoxNodeId: nodeId },
+    select: { diskGb: true, diskTotalGb: true, storageId: true },
+  }).catch(() => [] as Array<{ diskGb?: number | null; diskTotalGb?: number | null; storageId?: string | null }>)
+  if (!Array.isArray(rows)) return 0
+  return Number(
+    rows
+      .filter((row) => String(row?.storageId || "") === String(storageId || ""))
+      .reduce((total, row) => total + (Number(row?.diskGb) || Number(row?.diskTotalGb) || 0), 0)
+      .toFixed(2)
+  )
+}
+
 async function hasAvailableIp(input: { proxmoxNodeId: string; productId?: string | null; poolId?: string | null; requestedIp?: string | null; forceIpOverride?: boolean }) {
   return (await assignableIpPoolStatus({
     proxmoxNodeId: input.proxmoxNodeId,
@@ -288,6 +327,7 @@ export async function selectProvisioningNode(input: PlacementInput): Promise<Pro
   const preferredNodeId = input.nodeId ? String(input.nodeId).trim() : null
   const preferredNodeWhere = { ...(input.nodeId ? { id: input.nodeId } : {}) }
   const systemSettings = await provisioningSystemSettings()
+  const resourcePolicy: NodeResourcePolicy = await readNodeResourcePolicy()
   if (systemSettings.maintenanceMode) {
     return { ok: false, reason: "Provisioning is paused for maintenance", errorCode: "MAINTENANCE_MODE", candidates: [] }
   }
@@ -337,7 +377,16 @@ export async function selectProvisioningNode(input: PlacementInput): Promise<Pro
     }
 
     const capacity = await latestCapacitySnapshot(node.id)
-    const capacityReason = capacityBlockReason(capacity, systemSettings.ramThresholdPercent, Number(input.ramGb || 0))
+    // The gate is a planned-allocation policy, not a live free-memory reading.
+    // Live usage is still captured and shown, but a busy node is no longer
+    // treated as a full one.
+    const ramDecision = evaluateRamAllocation({
+      physicalRamGb: capacity?.ramTotalGb ?? null,
+      allocatedVmRamGb: await allocatedRamForNode(node.id),
+      requestedRamGb: Number(input.ramGb || 0),
+      policy: resourcePolicy,
+    })
+    const capacityReason = ramDecision.ok ? null : ramDecision.explanation
     if (capacityReason) {
       candidates.push({ ...base, ok: false, reason: capacityReason, capacity })
       if (node.id === preferredNodeId) {
@@ -345,10 +394,21 @@ export async function selectProvisioningNode(input: PlacementInput): Promise<Pro
           event: "node_capacity_warning",
           dedupeKey: `node:${node.id}:provisioning_capacity_warning`,
           title: `${node.name} capacity warning`,
-          message: `⚠️ Node Alert\n\nNode:\n${node.name}\n\nRAM:\n${capacity?.ramUsage.toFixed(1)}%\n\nAction:\nProvisioning will move to another compatible node if available.`,
+          message: `⚠️ Node Alert\n\nNode:\n${node.name}\n\nRAM policy:\n${capacityReason}`,
           nodeId: node.id,
           severity: "warning",
-          metadata: { cpuUsage: capacity?.cpuUsage, ramUsage: capacity?.ramUsage, ramFreeGb: capacity?.ramFreeGb, requiredRamGb: input.ramGb, threshold: { ram: systemSettings.ramThresholdPercent }, note: "CPU usage is informational and does not block provisioning" },
+          metadata: {
+            ramUsage: capacity?.ramUsage,
+            ramTotalGb: ramDecision.physicalRamGb,
+            systemReserveGb: ramDecision.systemReserveGb,
+            allocatableRamGb: ramDecision.allocatableRamGb,
+            policyCapGb: ramDecision.policyCapGb,
+            committedRamGb: ramDecision.committedRamGb,
+            remainingPolicyCapacityGb: ramDecision.remainingPolicyCapacityGb,
+            requiredRamGb: input.ramGb,
+            allocationPercent: resourcePolicy.ramAllocationPercent,
+            note: "RAM gating uses planned allocation, not live free memory. CPU usage is informational and does not block provisioning.",
+          },
         }).catch(() => null)
       }
       continue
@@ -366,6 +426,19 @@ export async function selectProvisioningNode(input: PlacementInput): Promise<Pro
     })
     if (!storagePool) {
       candidates.push({ ...base, ok: false, reason: input.storagePoolId ? "Selected storage pool unavailable" : "Storage pool unavailable" })
+      continue
+    }
+
+    // Storage is gated on the verified provisioning type, so a 5:1 logical
+    // ratio can never be applied to a datastore that reserves the full size.
+    const diskDecision = evaluateDiskAllocation({
+      pool: storagePool,
+      logicalAllocatedGb: await allocatedDiskForPool(node.id, String(storagePool.storageId || "")),
+      requestedDiskGb: Number(input.storageGb || 0),
+      policy: resourcePolicy,
+    })
+    if (!diskDecision.ok) {
+      candidates.push({ ...base, ok: false, reason: diskDecision.explanation, capacity })
       continue
     }
 

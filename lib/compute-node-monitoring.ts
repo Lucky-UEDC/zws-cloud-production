@@ -211,8 +211,15 @@ export function provisionBlocked(status: unknown) {
 export function safeMonitoringError(error: any) {
   const message = String(error?.message || "Proxmox API error")
   const status = Number(error?.status || 0)
+  const httpStatus = Number(error?.httpStatus || 0)
   const code = String(error?.code || "")
   const redacted = message.replace(new RegExp("PVEAPI" + "Token=[^\\s\"'<>]+", "gi"), "ProxmoxToken=[redacted]").slice(0, 240)
+  // The client already classifies a rejected credential precisely. Checking the
+  // code first is what turns an unusable `{"data":null}` body into a message
+  // that names the actual problem - an expired or mis-scoped API token on the
+  // node - instead of leaving an operator to guess.
+  if (code === "AUTH_FAILED_401" || httpStatus === 401) return "Proxmox authentication or permission failed"
+  if (code === "PERMISSION_DENIED_403" || httpStatus === 403) return "Proxmox authentication or permission failed"
   if (status === 400 && /unauthorized|token|permission|auth/i.test(message)) return "Proxmox authentication or permission failed"
   if (code === "VM_NOT_FOUND") return "Proxmox VM was not found on this node"
   if (code === "TEMPLATE_MISSING") return "Proxmox template is missing"
@@ -226,6 +233,9 @@ export function safeMonitoringError(error: any) {
   if (/timeout/i.test(message)) return "Proxmox API timeout"
   if (/certificate|tls/i.test(message)) return "Proxmox TLS/certificate issue"
   if (/connect|host|network/i.test(message)) return "Unable to reach Proxmox host"
+  // A body that was only ever `{"data":null}` reached here because the status
+  // was not one of the cases above. Name the failure rather than echoing it.
+  if (/^\{\s*"data"\s*:\s*null\s*\}$/.test(message)) return "Proxmox returned an empty error body"
   return message === "Proxmox API error" ? "Proxmox API error" : redacted
 }
 
