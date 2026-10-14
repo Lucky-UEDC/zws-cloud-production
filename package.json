@@ -18,7 +18,7 @@
     "start": "NODE_OPTIONS=\"--max-old-space-size=4096 --no-deprecation\" next start",
     "start:standalone": "NODE_OPTIONS=\"--max-old-space-size=4096 --no-deprecation\" node .next/standalone/server.js",
     "lint": "eslint .",
-    "test": "pnpm preflight:toolchain && NODE_OPTIONS=--no-deprecation node --import tsx --test --test-concurrency=1 --test-force-exit scripts/tests/unit/*.test.ts scripts/tests/unit/*.test.js",
+    "test": "pnpm preflight:toolchain && NODE_OPTIONS=--no-deprecation node --import tsx scripts/assert-test-db-isolation.ts && NODE_OPTIONS=--no-deprecation node --import tsx --test --test-concurrency=1 --test-force-exit scripts/tests/unit/*.test.ts scripts/tests/unit/*.test.js",
     "test:whatsapp": "NODE_OPTIONS=--no-deprecation tsx scripts/whatsapp-production-test.ts",
     "test:production": "NODE_OPTIONS=--no-deprecation node --import tsx --test --test-concurrency=1 --test-force-exit scripts/tests/unit/centralized-node-management.test.ts scripts/tests/unit/installer-auth-validation.test.ts scripts/tests/unit/enterprise-migration-safety.test.ts scripts/tests/unit/production-auto-integration.test.ts",
     "typecheck": "tsc --noEmit",

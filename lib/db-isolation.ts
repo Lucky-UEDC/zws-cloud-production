@@ -14,11 +14,16 @@
  * variables, and any connection whose target matches a declared production
  * identity is refused unless an operator overrides it deliberately.
  *
- * This module deliberately imports nothing. It is the thing `lib/db-url.ts`
- * consults, so depending on `lib/db-url` would make the guard part of the
- * cycle it is supposed to protect, and would break any context that loads the
- * URL resolver outside the bundler's alias handling (the Next config loader
- * among them). A guard that cannot load is a guard that does not run.
+ * This module deliberately imports nothing, not even `dotenv/config`. It is the
+ * thing `lib/db-url.ts` consults, so depending on `lib/db-url` would make the
+ * guard part of the cycle it is supposed to protect, and would break any
+ * context that loads the URL resolver outside the bundler's alias handling (the
+ * Next config loader among them). A guard that cannot load is a guard that does
+ * not run.
+ *
+ * Reading `.env` is the caller's job: the application loads it in `lib/db-url`,
+ * and the CLI loads it in `scripts/assert-db-isolation.ts`. Whoever invokes the
+ * guard must ensure the environment is populated first.
  */
 
 const POSTGRES_SCHEMES = new Set(["postgresql:", "postgres:", "pgsql:"])

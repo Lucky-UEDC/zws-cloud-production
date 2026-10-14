@@ -10,6 +10,7 @@
  * Exits 78 (EX_CONFIG) on refusal so a compose dependency fails loudly instead
  * of silently running a migration against the wrong database.
  */
+import "dotenv/config"
 import { assertSchemaWriteAllowed, databaseIsolationDiagnostic } from "@/lib/db-isolation"
 
 const operation = process.argv[2] || ""

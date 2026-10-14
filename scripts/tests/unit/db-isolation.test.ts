@@ -137,6 +137,17 @@ test("the diagnostic is redacted and safe to print at startup", () => {
   assert.equal(diagnostic.ok, false)
 })
 
+test("the guard loads its environment from the caller, not from itself", () => {
+  const source = readFileSync("lib/db-isolation.ts", "utf8")
+  // Importing nothing is what keeps the guard loadable, but that also means it
+  // cannot read .env itself. Both entry points must do it, or the guard
+  // silently reports "not configured" and refuses everything.
+  assert.doesNotMatch(source, /^import .*dotenv/m, "the guard must not load the environment itself")
+  assert.doesNotMatch(source, /require\(["']dotenv/)
+  assert.match(readFileSync("scripts/assert-db-isolation.ts", "utf8"), /^import "dotenv\/config"/m)
+  assert.match(readFileSync("lib/db-url.ts", "utf8"), /^import "dotenv\/config"/m)
+})
+
 test("the guard has no dependencies, so it can always load", () => {
   const source = readFileSync("lib/db-isolation.ts", "utf8")
   // The guard consults db-url; if it also imported it, the two would form a
