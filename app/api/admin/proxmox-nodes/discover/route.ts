@@ -68,7 +68,15 @@ async function resolveCredentials(request: NextRequest): Promise<ResolveResult> 
   const host = textValue(source.host)
   const tokenId = textValue(source.tokenId)
   const tokenSecret = textValue(source.tokenSecret)
-  const missing = [host && "host", tokenId && "tokenId", tokenSecret && "tokenSecret"].filter((entry) => !entry)
+  // `x && "name"` yields the NAME when present and "" when absent, so filtering
+  // the falsy entries keeps empty strings rather than names — which produced
+  // "Missing required fields: , , ." and told the caller nothing about what to
+  // supply. Collect the names of what is actually absent instead.
+  const missing = [
+    host ? null : "host",
+    tokenId ? null : "tokenId",
+    tokenSecret ? null : "tokenSecret",
+  ].filter((entry): entry is string => entry !== null)
   if (missing.length) {
     return {
       ok: false,

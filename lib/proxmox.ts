@@ -1390,6 +1390,12 @@ class ProxmoxClient {
       },
       body: form,
       signal: AbortSignal.timeout(PROXMOX_LONG_TIMEOUT_MS),
+      // `fetch` follows redirects by default. Every other call in this file goes
+      // through `node:https`, which does not, so without this the upload path was
+      // the one route by which a Proxmox host could redirect the panel — carrying
+      // an Authorization header — at a destination of its choosing, including a
+      // cloud metadata address. A redirect is reported, not followed.
+      redirect: "manual",
       // Proxmox often uses an internal/self-signed cert; regular API calls use
       // node:https above. This upload path is exposed only when TLS is trusted.
     } as RequestInit)
