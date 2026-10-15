@@ -66,10 +66,19 @@ export async function POST(request: NextRequest) {
 
   try {
     const diagnostic = await runProxmoxDiagnostics({ host, nodeName, tokenId, tokenSecret, allowInsecureTls, timeoutMs: PROXMOX_VALIDATION_TIMEOUT_MS })
+    // `diagnostic.ok` means the API is reachable and the token authenticated.
+    // `diagnostic.degraded` means that held, but at least one check was refused
+    // for want of permission — a correctly scoped token, not a broken one. Both
+    // are a 200: the wizard must be able to save the node, and the denied
+    // endpoints come back with it so the admin can see what to grant.
     return NextResponse.json(
       {
         ok: diagnostic.ok,
         success: diagnostic.ok,
+        degraded: diagnostic.degraded,
+        permissionDeniedEndpoints: diagnostic.permissionDeniedEndpoints,
+        failedEndpoints: diagnostic.failedEndpoints,
+        unmeasuredEndpoints: diagnostic.unmeasuredEndpoints,
         code: diagnostic.code,
         message: diagnostic.message,
         error: diagnostic.ok ? null : diagnostic.message,

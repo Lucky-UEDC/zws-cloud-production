@@ -124,6 +124,13 @@ test("every remaining Cloud-Init reference in the repo is a read, a label, or a 
     ["lib/guest-automation/constants.ts", "Linux-only tokens (cloud-init, cloudinit) that Windows must reject"],
     // -- shared Proxmox agent flag helper ----------------------------------------
     ["lib/proxmox-agent-flag.ts", "reads the Proxmox agent flag; no Cloud-Init writes"],
+    // -- storage capability detection --------------------------------------------
+    ["lib/proxmox/storage-capabilities.ts", "disk-key detection that must keep skipping legacy cloudinit drives when reading real disk formats"],
+    // -- Proxmox ACL reference table -------------------------------------------------
+    // `VM.Config.Cloudinit` is the name Proxmox itself gives that privilege. It
+    // appears here only so the panel can name the privilege it is missing; it is
+    // never set on a VM, and granting it is never suggested by any setup guide.
+    ["lib/proxmox/permission-requirements.ts", "the Proxmox privilege name VM.Config.Cloudinit, listed as a privilege the panel never requires"],
   ])
 
   const offenders: string[] = []

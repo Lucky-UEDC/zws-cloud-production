@@ -27,6 +27,7 @@ import {
   type WizardDiagnosticStep,
   type WizardForm,
 } from "./NodeWizard"
+import NodeHealthDashboard from "./NodeHealthDashboard"
 
 type NodeHealthState = "healthy" | "warning" | "critical" | "full" | "offline" | "overloaded" | "failed"
 
@@ -107,6 +108,12 @@ type TestState = {
   nodes: string[]
   host: string
   steps: DiagnosticStep[]
+  /** Connected and authenticated, but at least one check was refused. */
+  degraded?: boolean
+  /** Endpoints this token is valid but not permitted to read. */
+  permissionDeniedEndpoints?: string[]
+  /** Endpoints that failed for a reason other than permissions. */
+  failedEndpoints?: string[]
 }
 
 type DiagnosticStep = {
@@ -140,6 +147,9 @@ const emptyTest: TestState = {
   nodes: [],
   host: "",
   steps: [],
+  degraded: false,
+  permissionDeniedEndpoints: [],
+  failedEndpoints: [],
 }
 
 const connectionFields = new Set<keyof FormState>(["host", "nodeName", "tokenId", "tokenSecret", "allowInsecureTls"])
@@ -365,8 +375,26 @@ export default function ComputeNodesPage() {
       }
       const matchedNodeName = data?.matchedNode?.node || form.nodeName
       setForm((current) => ({ ...current, host: data.host || current.host, nodeName: matchedNodeName || current.nodeName }))
-      setTestState({ status: "success", message: data?.message || "Connection successful", code: data?.code || "OK", nodes: data.nodes || [], host: data.host || form.host, steps: data.steps || [] })
-      toast.success("Connection successful")
+      setTestState({
+        status: "success",
+        message: data?.message || "Connection successful",
+        code: data?.code || "OK",
+        nodes: data.nodes || [],
+        host: data.host || form.host,
+        steps: data.steps || [],
+        // A refused check is not a failed connection. The node is connected; it
+        // is just scoped more narrowly than the full feature set, and the
+        // administrator is told which grants are missing rather than being
+        // blocked from saving.
+        degraded: data?.degraded === true,
+        permissionDeniedEndpoints: data?.permissionDeniedEndpoints || [],
+        failedEndpoints: data?.failedEndpoints || [],
+      })
+      if (data?.degraded) {
+        toast.warning("Connected, but some checks were refused for want of permission")
+      } else {
+        toast.success("Connection successful")
+      }
     } catch (err: any) {
       const message = err?.message || testState.message || "Connection failed"
       setTestState((current) => current.status === "failed" ? current : { ...emptyTest, status: "failed", message, code: "UNKNOWN_ERROR" })
@@ -541,6 +569,19 @@ export default function ComputeNodesPage() {
           </Button>
         </div>
       </div>
+
+      {/*
+        Node health & capability dashboard.
+
+        Discovery runs server-side against the stored token and reports every
+        node the token can see, so this is the place that says which capabilities
+        are actually verified rather than merely reachable. It polls on its own
+        interval and pauses when the tab is hidden.
+      */}
+      <NodeHealthDashboard
+        nodeId={nodes[0]?.node?.id ?? null}
+        host={nodes[0]?.node?.host ?? null}
+      />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <StatCard label="Total Nodes" value={stats.total} icon={Server} color="text-blue-400" bgColor="bg-blue-400/10" />

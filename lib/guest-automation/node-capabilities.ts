@@ -266,9 +266,21 @@ export async function measureNodeCapabilities(input: {
   }))
 
   // -- guest side: only a real guest can prove these --------------------------
-  if (!connection.ok) {
+  //
+  // Gated on the *connection*, not on `connection.ok` meaning "every check
+  // passed".
+  //
+  // The gate used to be `if (!connection.ok)`, and `ok` was itself defined as
+  // "every endpoint succeeded" — including `/cluster/status` and
+  // `/nodes/{node}/status`, which need `Sys.Audit`. A token correctly scoped to VM
+  // work therefore failed that gate, every guest check was skipped, and the node
+  // was reported as having no guest agent on a host whose guests answered fine.
+  // The right precondition is the one the guest probes actually need: the API is
+  // reachable, the token authenticated, and the VM list can be read.
+  const apiUsable = connection.ok && !connection.steps.some((step) => step.code === "AUTH_FAILED_401")
+  if (!apiUsable) {
     for (const key of ["guest_agent", "guest_exec", "guest_password", "guest_fsinfo", "guest_network"] as NodeCapability[]) {
-      checks.push(check(key, { state: "skip", detail: "Not attempted: the node did not pass its API checks", durationMs: null, measured: false }))
+      checks.push(check(key, { state: "skip", detail: "Not attempted: the Proxmox API did not answer or rejected the token", durationMs: null, measured: false }))
     }
     const { status, blockers } = summariseCapabilities(checks)
     return { status, checks, summary: summariseChecks(checks), blockers }

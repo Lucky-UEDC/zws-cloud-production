@@ -16,7 +16,7 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { Activity, CheckCircle2, CircleAlert, Loader2, Server, XCircle } from "lucide-react"
+import { Activity, CheckCircle2, CircleAlert, Loader2, Server, ShieldAlert, XCircle } from "lucide-react"
 import { readJsonResponse } from "@/lib/client/safe-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -52,6 +52,12 @@ type ConnectionState = {
   nodes: string[]
   host: string
   steps: WizardDiagnosticStep[]
+  /** Endpoints this token is valid but not permitted to read. */
+  permissionDeniedEndpoints?: string[]
+  /** Endpoints that failed for a reason other than permissions. */
+  failedEndpoints?: string[]
+  /** Connected and authenticated, but some checks were refused. */
+  degraded?: boolean
 }
 
 export type CapabilityCheck = {
@@ -205,6 +211,15 @@ export function NodeWizardStepBody(props: {
             {connection.status === "testing" ? "Testing..." : "Test connection"}
           </Button>
           {connection.steps.length > 0 ? <DiagnosticSteps steps={connection.steps} /> : null}
+          {/*
+            A permission denial is reported as its own state, not as a failed
+            connection. The token worked; it is scoped more narrowly than the
+            panel's full feature set, and that is a legitimate configuration the
+            administrator should be able to save and then widen.
+          */}
+          {connection.status === "success" && connection.degraded ? (
+            <PermissionNotice denied={connection.permissionDeniedEndpoints || []} failed={connection.failedEndpoints || []} />
+          ) : null}
         </div>
       )
     case 5:
@@ -284,6 +299,69 @@ export function NodeWizardStepBody(props: {
     default:
       return null
   }
+}
+
+/**
+ * What the token may not read, and what that costs.
+ *
+ * Each endpoint is mapped to the Proxmox privilege it needs, so the instruction is
+ * a grant rather than a shrug. Nothing here changes a Proxmox ACL: it prints the
+ * line for an administrator to run on the Proxmox host.
+ */
+export function PermissionNotice({ denied, failed }: { denied: string[]; failed: string[] }) {
+  if (!denied.length && !failed.length) return null
+  return (
+    <div className="space-y-2 rounded-md border border-sky-500/30 bg-sky-500/5 p-3 text-xs">
+      <div className="flex items-center gap-1.5 font-medium text-sky-200">
+        <ShieldAlert className="h-3.5 w-3.5" />
+        Connected — some checks were refused
+      </div>
+      <p className="text-sky-200/90">
+        The API token is valid and the node is reachable. These endpoints refused the request for want of permission. The node can
+        still be added; the features below stay unavailable until the grants are applied on the Proxmox host.
+      </p>
+      {denied.length ? (
+        <div>
+          <div className="font-medium text-sky-200">Refused for permission</div>
+          <ul className="mt-0.5 list-inside list-disc space-y-0.5 font-mono text-[11px] text-sky-200/80">
+            {denied.map((endpoint) => (
+              <li key={endpoint}>
+                {endpoint} — needs {privilegeForEndpoint(endpoint)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {failed.length ? (
+        <div>
+          <div className="font-medium text-amber-200">Failed for another reason</div>
+          <ul className="mt-0.5 list-inside list-disc space-y-0.5 font-mono text-[11px] text-amber-200/80">
+            {failed.map((endpoint) => (
+              <li key={endpoint}>{endpoint}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <p className="text-sky-200/80">
+        The panel does not modify Proxmox ACLs. Apply the grant in the Proxmox shell as an administrator, then re-run this test.
+      </p>
+    </div>
+  )
+}
+
+/** The privilege a denied endpoint needs, or a pointer to the capability map. */
+function privilegeForEndpoint(endpoint: string): string {
+  const path = endpoint.replace(/^\/api2\/json/, "")
+  if (path === "/cluster/status" || path === "/cluster/config/nodes") return "Sys.Audit on /"
+  if (/^\/nodes\/[^/]+\/status$/.test(path)) return "Sys.Audit on /nodes/{node}"
+  if (/^\/nodes\/[^/]+\/disks\//.test(path)) return "Sys.Audit on /nodes/{node}"
+  if (/\/netstat$/.test(path)) return "Sys.Audit on /nodes/{node}"
+  if (/\/qemu\/\d+\/vncproxy|\/termproxy|\/sendkey/.test(path)) return "VM.Console on /vms/{vmid}"
+  if (/\/snapshot/.test(path)) return "VM.Snapshot on /vms/{vmid}"
+  if (/\/agent\/exec/.test(path)) return "VM.GuestAgent.Unrestricted on /vms/{vmid}"
+  if (/\/agent\//.test(path)) return "VM.GuestAgent.Audit on /vms/{vmid}"
+  if (/\/storage\//.test(path)) return "Datastore.Audit on /storage/{storage}"
+  return "a Proxmox privilege this panel does not record for it"
 }
 
 export function DiagnosticSteps({ steps }: { steps: WizardDiagnosticStep[] }) {

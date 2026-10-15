@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db"
 import { createProxmoxClient, ProxmoxError, PROXMOX_LONG_TIMEOUT_MS } from "@/lib/proxmox"
+import { BACKUP_CONTENT_TYPES, describeStorageCapability, parseStorageContent } from "@/lib/proxmox/storage-capabilities"
 import { listComputeNodes } from "@/lib/compute-node-monitoring"
 import { writeAuditLog } from "@/lib/audit-log"
 import { emitBackupLifecycleEvent } from "@/lib/notifications/backup-events"
@@ -95,10 +96,24 @@ function proxmoxClientForNode(node: { host: string; tokenId: string; tokenSecret
   })
 }
 
+/**
+ * Whether a storage can hold backups.
+ *
+ * Proxmox has two distinct backup content types and they are not
+ * interchangeable: `vzdump` is an ordinary storage that receives `.tar.zst`
+ * archives written by `POST /nodes/{node}/vzdump`, and `backup` is a Proxmox
+ * Backup Server datastore written over the PBS protocol.
+ *
+ * This used to accept only `backup`, while the node-level capability diagnostic
+ * accepted `backup` *or* `vzdump`. The result was a node card that advertised a
+ * working backup target which then vanished from the backup picker, because the
+ * most common backup storage in the world — a directory or NFS share with
+ * `content=images,vzdump` — matched one check and not the other. Both call sites
+ * now go through the one rule.
+ */
 function isBackupCapable(content?: string | string[]): boolean {
-  if (!content) return false
-  const raw = Array.isArray(content) ? content.join(",") : String(content)
-  return raw.split(",").filter(Boolean).map((s) => s.trim()).includes("backup")
+  const parsed = parseStorageContent(content)
+  return parsed.some((entry) => BACKUP_CONTENT_TYPES.includes(entry))
 }
 
 function numberFromBytes(value: unknown): number {
@@ -119,8 +134,15 @@ export async function discoverBackupStorages(nodeId: string): Promise<BackupStor
   const byId = new Map(dbPools.map((p) => [p.storageId, p]))
   const rows = Array.isArray(live) ? live : Array.isArray((live as any)?.data) ? (live as any).data : []
 
+  // The verdict comes from the shared capability descriptor, so "backup-capable"
+  // means the same thing here as it does on the node card. Previously this only
+  // looked at the content string: a storage that Proxmox reports as `active: 0`
+  // — unmounted, or simply not reachable from this node — was still handed to the
+  // backup scheduler as a target, and the backup failed at run time rather than
+  // at selection time.
   return rows
     .map((row: any) => {
+      const capability = describeStorageCapability(row)
       const pool = byId.get(String(row.storage))
       const totalBytes = numberFromBytes(row.total)
       const usedBytes = numberFromBytes(row.used)
@@ -129,10 +151,13 @@ export async function discoverBackupStorages(nodeId: string): Promise<BackupStor
         name: String(row.storage),
         type: String(row.type || ""),
         content: String(row.content || ""),
-        supportsBackup: isBackupCapable(row.content),
+        // Requires the content type *and* a storage Proxmox says is usable.
+        supportsBackup: capability.supportsBackups,
         totalBytes,
         usedBytes,
         availBytes,
+        // The panel's own override still wins over the Proxmox view when an
+        // administrator has deliberately disabled a pool here.
         enabled: pool ? pool.enabled !== false : true,
       }
     })

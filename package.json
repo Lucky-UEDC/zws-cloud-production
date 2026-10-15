@@ -137,6 +137,8 @@
     "console:repair": "tsx scripts/console-repair.ts",
     "console:validate:vnc": "tsx scripts/validate-panel-vnc.ts",
     "console:validate:serial": "tsx scripts/validate-panel-serial.ts",
+    "verify:proxmox:permissions": "tsx scripts/verify-proxmox-permissions.ts",
+    "proxmox:transport-check": "tsx scripts/live-proxmox-transport-check.ts",
     "verify:production": "tsx scripts/verify-production.ts",
     "referral:first-purchase-probe": "tsx scripts/referral-first-purchase-probe.ts"
   },

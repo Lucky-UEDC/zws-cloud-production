@@ -1,6 +1,12 @@
 import { prisma } from "@/lib/db"
 import { createProxmoxClient, ProxmoxError, PROXMOX_LONG_TIMEOUT_MS } from "@/lib/proxmox"
+import { storageTypeIsSnapshotCapable } from "@/lib/proxmox/storage-snapshot-rule"
 import { writeAuditLog } from "@/lib/audit-log"
+
+// The snapshot-capability rule is a property of the storage type, not of the
+// snapshot operations, so it lives with the storage rules and is re-exported
+// here for the callers that already import it from this module.
+export { storageTypeIsSnapshotCapable }
 
 const SNAPSHOT_TASK_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -138,15 +144,6 @@ export async function listSnapshotsForVm(nodeId: string, vmid: number): Promise<
 
   const hasLive = views.some((view) => view.name === "current")
   return hasLive ? views : [{ name: "current", description: "Live state of the server", vmstate: false, current: true, created: null, sizeBytes: null, raw: { name: "current" }, dbRecord: null }, ...views]
-}
-
-const SNAPSHOT_CAPABLE_TYPES = ["lvmthin", "zfspool", "zfs", "rbd", "ceph", "cephfs", "btrfs"]
-
-export function storageTypeIsSnapshotCapable(type: string, format: string): boolean {
-  const t = String(type || "").toLowerCase().trim()
-  if (SNAPSHOT_CAPABLE_TYPES.includes(t)) return true
-  if (t === "dir") return format === "qcow2"
-  return false
 }
 
 export type SnapshotDiskDiagnostic = {

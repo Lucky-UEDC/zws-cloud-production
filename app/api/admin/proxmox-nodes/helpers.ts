@@ -137,10 +137,17 @@ export async function testProxmoxConnection(input: {
     timeoutMs: input.timeoutMs || PROXMOX_VALIDATION_TIMEOUT_MS,
   })
 
+  // `diagnostic.ok` means the API is reachable and the token authenticated. It
+  // no longer means "every check passed": a token that is correctly denied
+  // `Sys.Audit` is connected and usable, and treating the denial as a failure is
+  // what made the wizard reject a working least-privilege configuration.
   if (diagnostic.ok) {
     return {
       success: true,
       ok: true,
+      degraded: diagnostic.degraded,
+      permissionDeniedEndpoints: diagnostic.permissionDeniedEndpoints,
+      failedEndpoints: diagnostic.failedEndpoints,
       host: normalizedHost,
       nodes: diagnostic.nodes,
       matchedNode: diagnostic.matchedNode,

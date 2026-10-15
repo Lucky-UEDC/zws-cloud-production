@@ -4,6 +4,8 @@ import http from "node:http"
 import https from "node:https"
 import tls from "node:tls"
 import { decryptSecretValue, isEncryptedSecret } from "@/lib/secret-crypto"
+import { explainDenial } from "@/lib/proxmox/permission-requirements"
+import { assessBackupCapability, assessSnapshotCapability } from "@/lib/proxmox/storage-capabilities"
 import {
   assertProxmoxTestModeHostIsNotProduction,
   isProxmoxTestMode,
@@ -85,7 +87,12 @@ export type ProxmoxErrorCode =
 export type ProxmoxDiagnosticStep = {
   name: string
   ok: boolean
-  code: ProxmoxErrorCode | "OK"
+  /**
+   * `OK` passed, `SKIP` was not applicable to this node, anything else is the
+   * classified failure. `SKIP` is deliberately not `ok`: an unmeasured check is
+   * never reported as a passing one.
+   */
+  code: ProxmoxErrorCode | "OK" | "SKIP"
   message: string
   durationMs: number
   endpoint?: string | null
@@ -95,7 +102,29 @@ export type ProxmoxDiagnosticStep = {
 }
 
 export type ProxmoxDiagnosticResult = {
+  /**
+   * True when the API is reachable, TLS is satisfied and the token
+   * authenticated. It says nothing about whether the token is permitted to read
+   * cluster or node status.
+   *
+   * This used to mean "every single check passed", which made a correctly
+   * least-privilege token look like a broken connection: `/cluster/status` and
+   * `/nodes/{node}/status` both require `Sys.Audit`, so a token scoped to VM work
+   * was rejected outright and the node could not be saved at all. A 403 is a
+   * capability answer, not a transport failure.
+   */
   ok: boolean
+  /**
+   * Reachable and authenticated, but at least one check was refused for want of
+   * permission. The connection is usable for what it can do.
+   */
+  degraded: boolean
+  /** Endpoints refused for want of permission. */
+  permissionDeniedEndpoints: string[]
+  /** Endpoints that failed for any other reason (transport, 404, timeout). */
+  failedEndpoints: string[]
+  /** Endpoints that did not apply and were deliberately not measured. */
+  unmeasuredEndpoints: string[]
   host: string
   nodeName: string
   message: string
@@ -861,13 +890,14 @@ export async function runProxmoxDiagnostics(input: {
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/status`, `/nodes/${input.nodeName}/status`, "DNS_FAILED", "Skipped because DNS failed"))
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/qemu`, `/nodes/${input.nodeName}/qemu`, "DNS_FAILED", "Skipped because DNS failed"))
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/storage`, `/nodes/${input.nodeName}/storage`, "DNS_FAILED", "Skipped because DNS failed"))
-    return { ok: false, host: normalizedHost, nodeName: input.nodeName, code: "DNS_FAILED", message, steps, nodes, matchedNode }
+    return { ok: false, degraded: false, permissionDeniedEndpoints: [], failedEndpoints: [], unmeasuredEndpoints: [], host: normalizedHost, nodeName: input.nodeName, code: "DNS_FAILED", message, steps, nodes, matchedNode }
   }
 
   const tcpStep = await diagnosticTcp(parts.hostname, parts.port, timeoutMs)
   steps.push(tcpStep)
   if (!tcpStep.ok) {
-    const code = tcpStep.code === "OK" ? "UNKNOWN_ERROR" : tcpStep.code
+    // `OK` and `SKIP` are not failure codes; the step is already known bad.
+    const code: ProxmoxErrorCode = tcpStep.code === "OK" || tcpStep.code === "SKIP" ? "UNKNOWN_ERROR" : tcpStep.code
     const message = tcpStep.message
     steps.push(failedDependency("HTTPS GET /api2/json/version", "/version", code, "Skipped because TCP connection failed"))
     steps.push(failedDependency("HTTPS GET /api2/json/nodes", "/nodes", code, "Skipped because TCP connection failed"))
@@ -876,14 +906,14 @@ export async function runProxmoxDiagnostics(input: {
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/status`, `/nodes/${input.nodeName}/status`, code, "Skipped because TCP connection failed"))
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/qemu`, `/nodes/${input.nodeName}/qemu`, code, "Skipped because TCP connection failed"))
     steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/storage`, `/nodes/${input.nodeName}/storage`, code, "Skipped because TCP connection failed"))
-    return { ok: false, host: normalizedHost, nodeName: input.nodeName, code, message, steps, nodes, matchedNode }
+    return { ok: false, degraded: false, permissionDeniedEndpoints: [], failedEndpoints: steps.slice(1).map((step) => step.endpoint || step.name), unmeasuredEndpoints: [], host: normalizedHost, nodeName: input.nodeName, code, message, steps, nodes, matchedNode }
   }
 
   if (parts.url.protocol === "https:") {
     const tlsStep = await diagnosticTls(parts.hostname, parts.port, timeoutMs, input.allowInsecureTls)
     steps.push(tlsStep)
     if (!tlsStep.ok) {
-      const code = tlsStep.code === "OK" ? "TLS_HANDSHAKE_ERROR" : tlsStep.code
+      const code: ProxmoxErrorCode = tlsStep.code === "OK" || tlsStep.code === "SKIP" ? "TLS_HANDSHAKE_ERROR" : tlsStep.code
       const message = tlsStep.message
       steps.push(failedDependency("HTTPS GET /api2/json/version", "/version", code, "Skipped because TLS handshake failed"))
       steps.push(failedDependency("HTTPS GET /api2/json/nodes", "/nodes", code, "Skipped because TLS handshake failed"))
@@ -892,7 +922,7 @@ export async function runProxmoxDiagnostics(input: {
       steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/status`, `/nodes/${input.nodeName}/status`, code, "Skipped because TLS handshake failed"))
       steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/qemu`, `/nodes/${input.nodeName}/qemu`, code, "Skipped because TLS handshake failed"))
       steps.push(failedDependency(`HTTPS GET /api2/json/nodes/${input.nodeName}/storage`, `/nodes/${input.nodeName}/storage`, code, "Skipped because TLS handshake failed"))
-      return { ok: false, host: normalizedHost, nodeName: input.nodeName, code, message, steps, nodes, matchedNode }
+      return { ok: false, degraded: false, permissionDeniedEndpoints: [], failedEndpoints: steps.slice(1).map((step) => step.endpoint || step.name), unmeasuredEndpoints: [], host: normalizedHost, nodeName: input.nodeName, code, message, steps, nodes, matchedNode }
     }
   }
 
@@ -969,15 +999,65 @@ export async function runProxmoxDiagnostics(input: {
   })
   steps.push(...capabilities.steps)
 
-  const required = [version.step, nodeList.step, clusterStatus.step, clusterResources.step, status.step, qemu.step, storage.step]
+  // -- verdict -----------------------------------------------------------------
+  //
+  // Connectivity and capability are two different questions and were being
+  // answered with one flag.
+  //
+  // Connectivity is: can we reach the API over TLS and did the token
+  // authenticate? That is DNS, TCP, TLS, `/version` and `/nodes`. If all five
+  // hold, the token is valid and the cluster is reachable.
+  //
+  // Capability is: may this token also read cluster status, node status, the VM
+  // list and storage? Those checks require `Sys.Audit` on `/` and on
+  // `/nodes/{node}`. A token scoped to VM work is *correctly* denied those, and
+  // folding the denial into `ok` made the wizard reject a working least-privilege
+  // configuration outright — and, because the guest-side probes were gated on
+  // `ok`, it also stopped the guest-agent checks from ever running, which is how a
+  // node with working guests came to be reported as having no guest agent.
+  const connectivitySteps = [version.step, nodeList.step]
+  const connected = dnsStep.ok && tcpStep.ok && (!parts.url.protocol.startsWith("https") || steps.find((step) => step.name === "TLS handshake")?.ok !== false)
+    && connectivitySteps.every((step) => step.ok)
+
+  const capabilitySteps = [clusterStatus.step, clusterResources.step, status.step, qemu.step, storage.step, ...capabilities.steps]
+  const permissionDeniedEndpoints = capabilitySteps
+    .filter((step) => !step.ok && step.code === "PERMISSION_DENIED_403")
+    .map((step) => step.endpoint || step.name)
+  // `SKIP` is "not measured", which is a different state from "failed" and must
+  // not be counted as one. A node with no VM to probe a console against is not a
+  // degraded node; it is a node with one unmeasured capability.
+  const failedEndpoints = capabilitySteps
+    .filter((step) => !step.ok && step.code !== "PERMISSION_DENIED_403" && step.code !== "SKIP")
+    .map((step) => step.endpoint || step.name)
+  const unmeasuredEndpoints = capabilitySteps
+    .filter((step) => !step.ok && step.code === "SKIP")
+    .map((step) => step.endpoint || step.name)
+
+  const degraded = connected && (permissionDeniedEndpoints.length > 0 || failedEndpoints.length > 0)
   const firstFailure = steps.find((step) => !step.ok)
-  const ok = required.every((step) => step.ok) && Boolean(matchedNode || !nodeList.step.ok)
+
   return {
-    ok,
+    ok: connected,
+    degraded,
+    permissionDeniedEndpoints,
+    failedEndpoints,
+    unmeasuredEndpoints,
     host: normalizedHost,
     nodeName: input.nodeName,
-    code: ok ? "OK" : (firstFailure?.code as ProxmoxErrorCode) || "UNKNOWN_ERROR",
-    message: ok ? "Proxmox connection test passed" : firstFailure?.message || "Proxmox connection test failed",
+    // The reported code names *why* it is degraded, so a caller keying off `code`
+    // cannot mistake a permission gap for a transport failure.
+    code: connected
+      ? permissionDeniedEndpoints.length > 0
+        ? "PERMISSION_DENIED_403"
+        : failedEndpoints.length > 0
+          ? (capabilitySteps.find((step) => failedEndpoints.includes(step.endpoint || step.name))?.code as ProxmoxErrorCode) || "UNKNOWN_ERROR"
+          : "OK"
+      : ((firstFailure?.code as ProxmoxErrorCode) || "UNKNOWN_ERROR"),
+    message: connected
+      ? degraded
+        ? `Connected, but ${permissionDeniedEndpoints.length + failedEndpoints.length} check(s) were refused or failed. The token is valid; it is not permitted to read them all.`
+        : "Proxmox connection test passed"
+      : firstFailure?.message || "Proxmox connection test failed",
     steps,
     nodes,
     matchedNode,
@@ -989,11 +1069,40 @@ export async function runProxmoxDiagnostics(input: {
  *
  * Exported because the node capability model reports each of these as its own
  * named check rather than as one lumped "capabilities" step, and because an admin
- * adding a node needs to see which of them failed. Note what the guest-agent
- * probe actually does: it reads Proxmox's own `agent` flag from the VM list. That
- * is the hypervisor saying the channel is open — not proof that an agent is
- * installed in the image and answering. `node-capabilities.ts` proves that part
- * for real, and does not accept this flag as a substitute.
+ * adding a node needs to see which of them failed.
+ *
+ * ## How console is actually probed
+ *
+ * It used to be probed like this:
+ *
+ * ```ts
+ * const vncTest  = await client.getVMConfig(node, 100).catch(() => null)   // "vncproxy"
+ * const termTest = await client.getVMStatus(node, 100).catch(() => null)   // "termproxy"
+ * const vncOk    = Boolean(vncTest)
+ * ```
+ *
+ * Three separate faults in three lines. Neither call touches the console API —
+ * one reads a VM's configuration, the other reads its runtime status. VMID 100
+ * was hard-coded, so on any node without a VM 100 both calls 404 and the panel
+ * reported "VNC proxy not available" and "Serial proxy not available" on a node
+ * whose console worked perfectly. And `.catch(() => null)` collapsed every
+ * failure into the same `null`, so a `VM.Console` permission denial — which is
+ * the *actual* common cause — became indistinguishable from a missing VM and
+ * reported a missing endpoint. The `status: vncOk ? 200 : 404` was then a
+ * fabricated number, never measured.
+ *
+ * It is now probed the only way it can be measured honestly: pick a VM this node
+ * really has, call `POST /nodes/{node}/qemu/{vmid}/vncproxy` and
+ * `POST /nodes/{node}/qemu/{vmid}/termproxy`, and report whatever actually came
+ * back. `vncproxy` is the endpoint noVNC uses — `vncwebsocket` is not a Proxmox
+ * endpoint at all and answers "not implemented" everywhere.
+ *
+ * ## What the guest-agent probe is and is not
+ *
+ * It reads Proxmox's own `agent` flag from the VM list. That is the hypervisor
+ * saying the channel answered, not proof that an agent is installed and
+ * responsive inside the image. `node-capabilities.ts` proves that part for real
+ * against a running guest, and does not accept this flag as a substitute.
  */
 export async function runProxmoxFeatureDiagnostics(input: {
   host: string
@@ -1005,138 +1114,128 @@ export async function runProxmoxFeatureDiagnostics(input: {
 }): Promise<{ steps: ProxmoxDiagnosticStep[] }> {
   const steps: ProxmoxDiagnosticStep[] = []
 
-  // Console support: check if vncproxy/termproxy endpoints are reachable
-  try {
-    const start = Date.now()
-    const client = createProxmoxClient(input.host, input.tokenId, input.tokenSecret, {
-      allowInsecureTls: input.allowInsecureTls,
-      timeoutMs: input.timeoutMs,
-    })
-    // Test vncproxy endpoint (noVNC console)
-    const vncTest = await client.getVMConfig(input.nodeName, 100).catch(() => null)
-    const vncOk = Boolean(vncTest)
-    steps.push({
-      name: "Console support (vncproxy)",
-      ok: vncOk,
-      code: vncOk ? "OK" : "CONSOLE_UNSUPPORTED",
-      message: vncOk ? "VNC proxy endpoint available" : "VNC proxy not available - graphical console may not work",
-      durationMs: Date.now() - start,
-      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/qemu/100/config`,
-      status: vncOk ? 200 : 404,
-    })
+  const client = createProxmoxClient(input.host, input.tokenId, input.tokenSecret, {
+    allowInsecureTls: input.allowInsecureTls,
+    timeoutMs: input.timeoutMs,
+  })
 
-    // Test termproxy endpoint (serial console)
-    const termTest = await client.getVMStatus(input.nodeName, 100).catch(() => null)
-    const termOk = Boolean(termTest)
-    steps.push({
-      name: "Serial console (termproxy)",
-      ok: termOk,
-      code: termOk ? "OK" : "TERMPROXY_UNSUPPORTED",
-      message: termOk ? "Serial proxy endpoint available" : "Serial proxy not available - serial console may not work",
-      durationMs: Date.now() - start,
-      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/qemu/100/status/current`,
-      status: termOk ? 200 : 404,
-    })
-  } catch {
-    steps.push({
-      name: "Console support (vncproxy)",
-      ok: false,
-      code: "CONSOLE_UNSUPPORTED",
-      message: "Unable to verify VNC proxy",
-      durationMs: 0,
-      endpoint: null,
-    })
-    steps.push({
-      name: "Serial console (termproxy)",
-      ok: false,
-      code: "TERMPROXY_UNSUPPORTED",
-      message: "Unable to verify termproxy",
-      durationMs: 0,
-      endpoint: null,
-    })
+  // The node's own VMs. A console can only be probed against a VM that exists.
+  let candidates: any[] = []
+  let vmListError: any = null
+  try {
+    candidates = (await client.getVMs(input.nodeName)) || []
+  } catch (error) {
+    vmListError = error
   }
 
-  // Snapshot support: check if storage supports snapshots
-  try {
+  // Prefer a running guest: a console on a stopped VM proves the permission but
+  // not the session. Fall back to any VM so a permission diagnosis is still
+  // possible on an idle node.
+  const running = candidates.filter((vm: any) => String(vm?.status || "") === "running")
+  const probeTarget = running[0] || candidates[0] || null
+  const probeVmid = probeTarget ? Number(probeTarget.vmid) : null
+
+  const consoleStep = async (kind: "vncproxy" | "termproxy", label: string, code: ProxmoxErrorCode, body: Record<string, unknown>): Promise<ProxmoxDiagnosticStep> => {
     const start = Date.now()
-    const client = createProxmoxClient(input.host, input.tokenId, input.tokenSecret, {
-      allowInsecureTls: input.allowInsecureTls,
-      timeoutMs: input.timeoutMs,
-    })
-    const storages = await client.getStorages(input.nodeName).catch(() => [])
-    const snapshotCapable = storages.some((s: any) => s.type === "dir" || s.type === "lvmthin" || s.type === "zfspool" || s.type === "btrfs")
-    steps.push({
-      name: "Snapshot support",
-      ok: snapshotCapable,
-      code: snapshotCapable ? "OK" : "SNAPSHOT_UNSUPPORTED",
-      message: snapshotCapable ? "Storage supports snapshots (dir/lvmthin/zfspool/btrfs)" : "No snapshot-capable storage found",
-      durationMs: Date.now() - start,
-      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/storage`,
-    })
-  } catch {
-    steps.push({
-      name: "Snapshot support",
-      ok: false,
-      code: "SNAPSHOT_UNSUPPORTED",
-      message: "Unable to verify snapshot capability",
-      durationMs: 0,
-      endpoint: null,
-    })
+    if (!probeVmid) {
+      return {
+        name: label,
+        ok: false,
+        code: "SKIP",
+        message: `Not probed: no VM was found on ${input.nodeName} to open a ${kind} session against. Console capability is per-VM and needs a real target.`,
+        durationMs: 0,
+        endpoint: null,
+        status: null,
+      }
+    }
+    const endpoint = `/nodes/${encodeURIComponent(input.nodeName)}/qemu/${probeVmid}/${kind}`
+    try {
+      await client.requestWithStatus(endpoint, "POST", body, input.timeoutMs)
+      return {
+        name: label,
+        ok: true,
+        code: "OK" as const,
+        message: `VM ${probeVmid} accepted the ${kind} request — this API token holds VM.Console on it.`,
+        durationMs: Date.now() - start,
+        endpoint,
+        status: 200,
+      }
+    } catch (error: any) {
+      const denied = error?.code === "PERMISSION_DENIED_403"
+      const denial = denied ? explainDenial({ path: endpoint, method: "POST", httpStatus: 403, proxmoxMessage: error?.proxmoxMessage || error?.message, params: { node: input.nodeName, vmid: probeVmid } }) : null
+      return {
+        name: label,
+        ok: false,
+        code: denied ? ("PERMISSION_DENIED_403" as const) : code,
+        message: denied
+          ? `VM ${probeVmid}: this token is not permitted to open a ${kind} session. ${denial?.remediation ?? "Grant VM.Console on /vms/" + probeVmid + " on the Proxmox host."}`
+          : `VM ${probeVmid}: ${kind} failed — ${String(error?.message || "unknown error")}`,
+        durationMs: Date.now() - start,
+        endpoint,
+        status: typeof error?.httpStatus === "number" ? error.httpStatus : null,
+      }
+    }
   }
 
-  // Backup support: check vzdump availability and backup storage
-  try {
-    const start = Date.now()
-    const client = createProxmoxClient(input.host, input.tokenId, input.tokenSecret, {
-      allowInsecureTls: input.allowInsecureTls,
-      timeoutMs: input.timeoutMs,
-    })
-    const storages = await client.getStorages(input.nodeName).catch(() => [])
-    const backupCapable = storages.some((s: any) => s.content?.includes("vzdump") || s.content?.includes("backup"))
-    steps.push({
-      name: "Backup support (vzdump)",
-      ok: backupCapable,
-      code: backupCapable ? "OK" : "BACKUP_UNSUPPORTED",
-      message: backupCapable ? "Storage configured for vzdump/backup content" : "No storage with backup/vzdump content type",
-      durationMs: Date.now() - start,
-      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/storage`,
-    })
-  } catch {
-    steps.push({
-      name: "Backup support (vzdump)",
-      ok: false,
-      code: "BACKUP_UNSUPPORTED",
-      message: "Unable to verify backup capability",
-      durationMs: 0,
-      endpoint: null,
-    })
-  }
+  steps.push(await consoleStep("vncproxy", "Console support (vncproxy)", "CONSOLE_UNSUPPORTED", { websocket: 1 }))
+  steps.push(await consoleStep("termproxy", "Serial console (termproxy)", "TERMPROXY_UNSUPPORTED", { serial: 0 }))
 
-  // Guest agent capability
-  try {
-    const start = Date.now()
-    const client = createProxmoxClient(input.host, input.tokenId, input.tokenSecret, {
-      allowInsecureTls: input.allowInsecureTls,
-      timeoutMs: input.timeoutMs,
-    })
-    const vms = await client.getVMs(input.nodeName).catch(() => [])
-    const hasQemuAgent = vms.some((vm: any) => vm.agent === 1)
-    steps.push({
-      name: "Guest agent (qemu-guest-agent)",
-      ok: hasQemuAgent,
-      code: hasQemuAgent ? "OK" : "GUEST_AGENT_UNAVAILABLE",
-      message: hasQemuAgent ? "At least one VM reports guest agent running" : "No VM reports guest agent (qemu-guest-agent) - disk usage, password rotation, guest exec may not work",
-      durationMs: Date.now() - start,
-      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/qemu`,
-    })
-  } catch {
+  if (vmListError) {
     steps.push({
       name: "Guest agent (qemu-guest-agent)",
       ok: false,
       code: "GUEST_AGENT_UNAVAILABLE",
-      message: "Unable to verify guest agent capability",
+      message: `Not probed: the VM list on ${input.nodeName} could not be read (${String((vmListError as any)?.message || vmListError)}).`,
       durationMs: 0,
-      endpoint: null,
+      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/qemu`,
+      status: null,
+    })
+  } else {
+    // Snapshot and backup are decided from the storage's own configuration by the
+    // shared detectors, not by a substring match on the storage type. See
+    // lib/proxmox/storage-capabilities.ts for why a `dir` storage is not
+    // unconditionally snapshot-capable.
+    const storages = (await client.getStorages(input.nodeName).catch(() => [])) || []
+    const snapshot = assessSnapshotCapability(Array.isArray(storages) ? storages : [])
+    const backup = assessBackupCapability(Array.isArray(storages) ? storages : [])
+
+    steps.push({
+      name: "Snapshot support",
+      ok: snapshot.supported,
+      code: snapshot.supported ? "OK" : "SNAPSHOT_UNSUPPORTED",
+      message: snapshot.supported
+        ? snapshot.detail
+        : `${snapshot.detail}${snapshot.remediation ? ` Remediation: ${snapshot.remediation}` : ""}`,
+      durationMs: 0,
+      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/storage`,
+      status: null,
+    })
+
+    steps.push({
+      name: "Backup support (vzdump)",
+      ok: backup.supported,
+      code: backup.supported ? "OK" : "BACKUP_UNSUPPORTED",
+      message: backup.supported
+        ? backup.detail
+        : `${backup.detail}${backup.remediation ? ` Remediation: ${backup.remediation}` : ""}`,
+      durationMs: 0,
+      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/storage`,
+      status: null,
+    })
+
+    const agentFlagged = candidates.filter((vm: any) => Number(vm.agent) === 1)
+    steps.push({
+      name: "Guest agent (qemu-guest-agent)",
+      ok: agentFlagged.length > 0,
+      code: agentFlagged.length > 0 ? "OK" : "GUEST_AGENT_UNAVAILABLE",
+      message: agentFlagged.length
+        ? `${agentFlagged.length} of ${candidates.length} VM(s) report the guest agent channel responding`
+        : candidates.length
+          ? `None of the ${candidates.length} VM(s) on this node report the guest agent channel responding. This is the hypervisor's own flag; whether an agent is installed in the image is proven separately against a running guest.`
+          : `No VMs on this node to report a guest agent.`,
+      durationMs: 0,
+      endpoint: `/nodes/${encodeURIComponent(input.nodeName)}/qemu`,
+      status: null,
     })
   }
 
