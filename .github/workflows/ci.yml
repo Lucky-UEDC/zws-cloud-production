@@ -69,6 +69,11 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=8192 --no-deprecation --expose-gc
 
+      - name: Build
+        run: pnpm build
+        env:
+          ZWS_SKIP_SETTINGS_DB_DURING_BUILD: "1"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -85,13 +90,18 @@ jobs:
           context: .
           target: runner
           load: true
-          tags: ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}
+          tags: zws-cloud:ci-${{ github.sha }}
+
+      - name: Verify the image exists locally
+        run: docker image inspect zws-cloud:ci-${{ github.sha }}
 
       - name: Verify standalone artifact inside the image
         run: |
-          docker run --rm ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }} \
+          docker run --rm zws-cloud:ci-${{ github.sha }} \
             sh -c 'test -f /app/.next/standalone/server.js && test -f /app/.next/BUILD_ID && test -f /app/prisma/schema.prisma'
 
       - name: Publish the verified image
         if: github.event_name == 'push'
-        run: docker push ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}
+        run: |
+          docker tag zws-cloud:ci-${{ github.sha }} ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}
+          docker push ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}
