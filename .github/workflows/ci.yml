@@ -1,33 +1,49 @@
 name: ci
 
+# Production CI for zwscloud.in: typecheck, lint, unit tests, Docker build,
+# image verification and publish. Runs on GitHub-hosted runners so the
+# production VPS is never used as a build machine.
+# Pushes an immutable, sha-tagged image to GHCR. `latest` is never published.
+
 on:
   push:
     branches: [main, master]
   pull_request:
-  # Lets a branch be re-verified on demand without pushing a dummy commit.
   workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   validate:
-    name: Typecheck, lint, test, build
+    name: Typecheck, lint, test, Docker build, image verification
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
-      CI: "true"
-      DATABASE_URL: postgresql://zwscloud_app:zwscloud_app@127.0.0.1:5432/zwscloud?schema=public
+      NODE_ENV: production
+      DATABASE_URL: postgresql://zwscloud_app:zwscloud_app@127.0.0.1:5433/zwscloud?schema=public
       NEXT_TELEMETRY_DISABLED: "1"
       ZWS_SKIP_SETTINGS_DB_DURING_BUILD: "1"
+      ZWS_ALLOW_PRODUCTION_DATABASE_ACCESS: "1"
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: zwscloud
+          POSTGRES_USER: zwscloud_app
+          POSTGRES_PASSWORD: zwscloud_app
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U zwscloud_app -d zwscloud"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
-        # No pinned `version` here on purpose: packageManager in package.json is
-        # the single source of truth. Pinning a second version made
-        # pnpm/action-setup abort with "Multiple versions of pnpm specified",
-        # which failed every workflow run including on main.
         with:
           run_install: false
 
@@ -50,58 +66,32 @@ jobs:
 
       - name: Unit tests
         run: pnpm test
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192 --no-deprecation --expose-gc
 
-      - name: Build
-        run: pnpm build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-  docker:
-    name: Build image (immutable metadata)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    needs: validate
-    steps:
-      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Compute source fingerprint
-        id: fingerprint
-        run: |
-          FP="$(find . -path ./node_modules -prune -o -type f -print | sort | xargs sha256sum | sha256sum | cut -c1-12)"
-          echo "fp=${FP}" >> "$GITHUB_OUTPUT"
-
-      # Deterministic, inspectable tag. The previous tag was a content hash,
-      # which is fine for caching but easy to get wrong: the build runs inside
-      # buildx, so with push=false nothing lands in the runner's local image
-      # store unless we ask for `load: true`. Without it, the following
-      # `docker image inspect` failed on a tag that genuinely did not exist,
-      # which is why this step was never green on any commit.
-      - name: Build image
-        id: build
-        uses: docker/build-push-action@v6
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
         with:
           context: .
           target: runner
-          push: false
-          # `load` puts the built image into the runner's docker daemon so it
-          # can actually be inspected. Without this the inspect below is a
-          # lookup of a reference that was never created locally.
           load: true
-          tags: zws-cloud:ci-${{ github.sha }}
-          build-args: |
-            APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'ci' }}
-            APP_COMMIT=${{ github.sha }}
-            APP_SOURCE_DATE=${{ github.event.head_commit.timestamp }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}
 
-      - name: Verify the image exists locally
+      - name: Verify standalone artifact inside the image
         run: |
-          docker image inspect zws-cloud:ci-${{ github.sha }} > /dev/null
-          docker images zws-cloud:ci-${{ github.sha }}
+          docker run --rm ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }} \
+            sh -c 'test -f /app/.next/standalone/server.js && test -f /app/.next/BUILD_ID && test -f /app/prisma/schema.prisma'
 
-      - name: Report image size
-        run: |
-          SIZE="$(docker image inspect zws-cloud:ci-${{ github.sha }} --format='{{.Size}}')"
-          echo "image_size_bytes=${SIZE}"
-          echo "image_size_human=$(numfmt --to=iec "$SIZE")"
+      - name: Publish the verified image
+        if: github.event_name == 'push'
+        run: docker push ghcr.io/lucky-uedc/zws-cloud-production:${{ github.sha }}

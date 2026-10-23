@@ -1,0 +1,164 @@
+name: deploy-production
+
+# Deploys the image CI just verified to the zwscloud.in production host via
+# Docker Compose over SSH. The exact tested image digest is deployed; no code
+# is rebuilt on the server. Every deploy:
+#   1. records the previous image as the rollback anchor
+#   2. takes an encrypted pre-deploy database backup
+#   3. runs Prisma migrations through the Compose migrate service
+#   4. swaps the running containers to the new image
+#   5. verifies the public health endpoint
+#   6. on any failure, rolls back to the anchor image and re-verifies
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA, tag or branch to deploy
+        required: true
+        default: main
+      rollback:
+        description: Roll back to the previous release instead of deploying
+        type: boolean
+        default: false
+      skip_backup:
+        description: Emergency only - skip the pre-deploy database backup
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy to zwscloud.in via Docker Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    env:
+      PROD_HEALTH_URL: https://zwscloud.in/api/health
+      APP_IMAGE: ghcr.io/lucky-uedc/zws-cloud-production
+      RAW_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
+      ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.rollback || 'false' }}
+      SKIP_BACKUP: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_backup || 'false' }}
+    steps:
+      - name: Validate the deploy ref
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          REF="$RAW_REF"
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "refusing to deploy: workflow_run head_sha '$REF' is not a full commit SHA" >&2
+              exit 1
+            fi
+          elif [[ ! "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/@-]*$ ]]; then
+            echo "invalid ref input: $REF" >&2
+            exit 1
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH with a pinned host key
+        env:
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$PROD_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          ssh-keygen -y -f ~/.ssh/id_deploy >/dev/null
+
+      - name: Record rollback anchor before any change
+        if: ${{ env.ROLLBACK == 'false' }}
+        run: |
+          set -euo pipefail
+          TARGET="${PROD_USER}@${PROD_HOST}"
+          ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            "$TARGET" \
+            "cd /var/www/zwscloud && \
+             docker inspect zwscloud-app-1 --format '{{.Config.Image}}' > /root/.zws-last-image && \
+             [ -s /root/.zws-last-image ] && echo 'rollback anchor: '$(cat /root/.zws-last-image)"
+
+      - name: Deploy
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          TARGET="${PROD_USER}@${PROD_HOST}"
+          SSH="ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=30"
+          if [ "$ROLLBACK" = "true" ]; then
+            $SSH "$TARGET" \
+              "cd /var/www/zwscloud && export ZWS_IMAGE=\$(cat /root/.zws-last-image) && \
+               docker compose up -d app worker scheduler && echo 'rolled back to previous release'"
+          elif [ "$SKIP_BACKUP" = "true" ]; then
+            echo "Skipping pre-deploy database backup (emergency mode)"
+            $SSH "$TARGET" \
+              "cd /var/www/zwscloud && \
+               docker pull ${APP_IMAGE}:${REF} && \
+               export ZWS_IMAGE=${APP_IMAGE}:${REF} && \
+               docker compose run --rm migrate && \
+               docker compose up -d --remove-orphans app worker scheduler"
+          else
+            $SSH "$TARGET" \
+              "cd /var/www/zwscloud && \
+               docker pull ${APP_IMAGE}:${REF} && \
+               export ZWS_IMAGE=${APP_IMAGE}:${REF} && \
+               docker compose --profile backup run --rm backup && \
+               docker compose run --rm migrate && \
+               docker compose up -d --remove-orphans app worker scheduler && \
+               docker inspect ${APP_IMAGE}:${REF} --format 'deployed image: {{.Id}}'"
+          fi
+
+      - name: Verify health
+        run: |
+          set -euo pipefail
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -fsS --max-time 15 "${PROD_HEALTH_URL}" -o /tmp/prod-health.json; then
+              head -c 400 /tmp/prod-health.json; echo; exit 0
+            fi
+            sleep 10
+          done
+          echo "production health check failed: ${PROD_HEALTH_URL}" >&2
+          exit 1
+
+      - name: Roll back to previous release
+        if: failure()
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+        run: |
+          set -euo pipefail
+          TARGET="${PROD_USER}@${PROD_HOST}"
+          ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ConnectTimeout=30 \
+            "$TARGET" \
+            "cd /var/www/zwscloud && export ZWS_IMAGE=\$(cat /root/.zws-last-image) && \
+             docker compose up -d app worker scheduler"
+          for _ in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 15 "${PROD_HEALTH_URL}" -o /tmp/health.json; then
+              echo "rollback verified"; head -c 200 /tmp/health.json; echo; exit 0
+            fi
+            sleep 10
+          done
+          echo "rollback health check failed - investigate on the server" >&2
+          exit 1

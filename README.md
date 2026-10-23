@@ -1,3 +1,7 @@
+# ZWS Cloud — PRODUCTION (https://zwscloud.in)
+
+> This repository deploys to the live production VPS. Never run experiments, test builds, or throwaway migrations against it. Development lives in `zws-cloud-panel` (`dev.zwscloud.com`) and must stay completely separated.
+
 # UltraEdge Datacenter Platform
 
 ![Version](https://img.shields.io/badge/version-1.1.0-blue)
