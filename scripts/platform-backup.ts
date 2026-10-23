@@ -76,6 +76,30 @@ function pgDumpBin() { return String(process.env.ZWS_PG_DUMP_BIN || "pg_dump").t
 function pgRestoreBin() { return String(process.env.ZWS_PG_RESTORE_BIN || "pg_restore").trim() || "pg_restore" }
 function psqlBin() { return String(process.env.ZWS_PSQL_BIN || "psql").trim() || "psql" }
 
+/**
+ * Rewrite database URL for pg_dump/pg_restore when running inside a container.
+ * Rewrites 127.0.0.1/localhost to host.docker.internal so the database on the
+ * host can be reached from within the container.
+ */
+function rewriteDbUrlForContainer(raw: string): string {
+  try {
+    const url = new URL(raw)
+    const hostname = url.hostname
+    if (hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1") {
+      url.hostname = "host.docker.internal"
+      url.port = process.env.HOST_DATABASE_PROXY_PORT || "15432"
+    }
+    return url.toString()
+  } catch {
+    return raw
+  }
+}
+
+function sanitizePostgresUrlForContainer(raw: string): string {
+  const rewritten = rewriteDbUrlForContainer(raw)
+  return sanitizePostgresUrlForPgDump(rewritten)
+}
+
 function passphrase() {
   const value = String(process.env.ZWS_BACKUP_ENCRYPTION_PASSPHRASE || "").trim()
   if (!value) {
@@ -209,7 +233,7 @@ async function assertClientSupportsServer() {
 
   const serverMajor = await execFileAsync(
     psqlBin(),
-    [sanitizePostgresUrlForPgDump(process.env.DATABASE_URL || ""), "-tAc", "SHOW server_version_num"],
+    [sanitizePostgresUrlForContainer(process.env.DATABASE_URL || ""), "-tAc", "SHOW server_version_num"],
     { maxBuffer: 1024 * 1024 }
   )
     .then((result) => Math.floor(Number(String(result.stdout).trim()) / 10_000))
@@ -267,7 +291,7 @@ async function create() {
   const plainPath = path.join(requireDirectory(), `.plain-${stamp}.dump`)
 
   try {
-    await execFileAsync(pgDumpBin(), [sanitizePostgresUrlForPgDump(process.env.DATABASE_URL || ""), "--format=custom", "--compress=6", "--no-owner", "--no-privileges", "-f", plainPath], {
+    await execFileAsync(pgDumpBin(), [sanitizePostgresUrlForContainer(process.env.DATABASE_URL || ""), "--format=custom", "--compress=6", "--no-owner", "--no-privileges", "-f", plainPath], {
       maxBuffer: 1024 * 1024 * 32,
     })
 
@@ -392,7 +416,7 @@ async function restore() {
   const plainPath = path.join(requireDirectory(), `.restore-${manifest.fileName.replace(/[^a-zA-Z0-9.-]/g, "_")}.dump`)
   try {
     await decryptFile(artifactPath(manifest.fileName), plainPath, manifest.iv, manifest.tag)
-    await execFileAsync(pgRestoreBin(), ["--no-owner", "--no-privileges", "--dbname", target, plainPath], { maxBuffer: 1024 * 1024 * 64 })
+    await execFileAsync(pgRestoreBin(), ["--no-owner", "--no-privileges", "--dbname", sanitizePostgresUrlForContainer(target), plainPath], { maxBuffer: 1024 * 1024 * 64 })
     return { ok: true, restoredFrom: manifest.fileName, target: `${proposed.database}@${proposed.host}:${proposed.port}` }
   } finally {
     fs.rmSync(plainPath, { force: true })
