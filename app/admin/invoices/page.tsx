@@ -129,6 +129,10 @@ export default function AdminInvoicesPage() {
   async function runBulkAction() {
     if (!bulkAction || !selectedIds.length) return
     if (bulkAction === "delete_selected_pending_cancelled") {
+      if (selectedDeletableCount === 0) {
+        toast.message("None of the selected invoices is eligible for permanent deletion. Paid/settled records are protected.")
+        return
+      }
       setBulkDeleteOpen(true)
       return
     }
