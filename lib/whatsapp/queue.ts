@@ -17,6 +17,7 @@ import { WHATSAPP_TEMPLATE_KEYS } from "@/lib/whatsapp/template-registry"
 import { normalizeProviderJob, type WhatsAppProviderName } from "@/lib/whatsapp/provider"
 import { normalizeOtpError, WhatsAppOtpError } from "@/lib/whatsapp/otp-errors"
 import { paymentFlowLog } from "@/lib/payment-flow-log"
+import { sendEmergencyDeliveryFailureAlert } from "@/lib/admin-emergency-alert"
 
 export const WHATSAPP_SEND_QUEUE = "whatsapp-send"
 export const WHATSAPP_CAMPAIGN_QUEUE = "whatsapp-campaign"
@@ -233,6 +234,21 @@ export async function enqueueWhatsAppMessage(input: WhatsAppSendJob, options?: J
       failureReason: "redis_unavailable",
       metadata: { source: normalizedInput.metadata?.source || "enqueue_message" },
     })
+    if (normalizedInput.metadata?.suppressEmergencyAlert !== true) {
+      await sendEmergencyDeliveryFailureAlert({
+        queueName,
+        jobId: String(normalizedInput.metadata?.dedupeKey || normalizedInput.metadata?.notificationKey || "redis-unavailable"),
+        attemptCount: 1,
+        errorCode: "REDIS_QUEUE_UNAVAILABLE",
+        failureReason: "redis_unavailable",
+        errorMessage: "Redis queue is unavailable; the outgoing message could not be accepted for retry.",
+      }).catch((alertError) => {
+        console.error("[whatsapp-queue] admin alert failed while queue unavailable", {
+          queueName,
+          error: alertError instanceof Error ? alertError.message : String(alertError),
+        })
+      })
+    }
     return { ok: false, status: "failed", error: "Redis queue is not configured", toMasked: normalized.maskedPhone }
   }
 
