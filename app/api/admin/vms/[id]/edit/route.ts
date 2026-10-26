@@ -158,7 +158,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       const cachedNet0 = jsonRecord(vps.vmNetworkInterfaces[0]?.metadata).net0
       proxmoxPatch.net0 = buildNet0(currentConfig?.net0 || cachedNet0 || "", macAddress)
     }
-    if (ipAddress) {
+    if (changingIp && ipAddress) {
       const currentIp = parseIpConfig0(currentConfig?.ipconfig0)
       const allocation = vps.ipAllocations[0]
       const pool = allocation?.pool
