@@ -61,7 +61,7 @@ export default function AdminInvoicesPage() {
     if (res.ok) {
       const rows = data.invoices || []
       setInvoices(rows)
-      setSelectedIds((ids) => ids.filter((id) => rows.some((invoice: Invoice) => invoice.id === id)))
+      setSelectedIds((ids) => ids.filter((id) => rows.some((invoice: Invoice) => invoice.id === id && invoice.deletionSafety?.deletable === true)))
     } else {
       toast.error(data.error || "Failed to load invoices")
     }
