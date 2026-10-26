@@ -9,7 +9,7 @@ const localClaims = new Map<string, number>()
 
 function clean(value: unknown, maxLength = 300) {
   return String(value ?? "unknown")
-    .replace(/(?:bearer\s+)[a-z0-9._\-+/=]+/gi, "$1[redacted]")
+    .replace(/(bearer\s+)[a-z0-9._\-+/=]+/gi, "$1[redacted]")
     .replace(/(password|token|secret|api[_-]?key)[\"':=\s]+[^\s,;]+/gi, "$1=[redacted]")
     .replace(/\b\d{6}\b/g, "[redacted]")
     .replace(/\b\d{8,15}\b/g, "[number-redacted]")
