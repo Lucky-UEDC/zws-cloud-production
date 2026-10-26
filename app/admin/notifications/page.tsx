@@ -91,7 +91,8 @@ export default function AdminNotificationsPage() {
                 <Switch checked={settings.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, enabled })} />
                 <Label>Enable Notifications</Label>
               </div>
-              <div className="space-y-2"><Label>Notification Number</Label><Input value={settings.notificationNumber || ""} onChange={(e) => setSettings({ ...settings, notificationNumber: e.target.value })} /></div>
+              <div className="space-y-2"><Label>Emergency WhatsApp Number</Label><Input value={settings.notificationNumber || ""} onChange={(e) => setSettings({ ...settings, notificationNumber: e.target.value })} placeholder="+911234567890" /><p className="text-xs text-muted-foreground">Used for urgent terminal delivery failures.</p></div>
+              <div className="space-y-2"><Label>Emergency Email</Label><Input type="email" value={settings.notificationEmail || ""} onChange={(e) => setSettings({ ...settings, notificationEmail: e.target.value })} placeholder="admin@example.com" /><p className="text-xs text-muted-foreground">Independent fallback if WhatsApp delivery fails.</p></div>
               <div className="space-y-2"><Label>Operations Numbers</Label><Input value={(settings.operationsNumbers || []).join(", ")} onChange={(e) => setSettings({ ...settings, operationsNumbers: e.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} placeholder="+911234567890, +919876543210" /></div>
               <div className="space-y-2">
                 <Label>Delivery mode</Label>
