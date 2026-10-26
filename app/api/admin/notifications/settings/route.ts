@@ -37,6 +37,13 @@ export async function PUT(request: NextRequest) {
 
   try {
     const body = await request.json().catch(() => ({}))
+    if (body.notificationEmail !== undefined) {
+      const email = String(body.notificationEmail || "").trim()
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return NextResponse.json({ success: false, error: "Enter a valid emergency alert email address", code: "invalid_emergency_email" }, { status: 400 })
+      }
+      body.notificationEmail = email
+    }
     const settings = await updateAdminNotificationSettings(body, String(admin.email))
     return NextResponse.json({ success: true, settings })
   } catch (error: any) {
