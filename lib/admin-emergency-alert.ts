@@ -3,7 +3,6 @@ import { getAdminNotificationSettings } from "@/lib/admin-notifications"
 import { createPanelLog } from "@/lib/panel-log"
 import { getRedisClient } from "@/lib/redis"
 import { sendEmail } from "@/lib/mailer"
-import { sendWhatsAppMessage } from "@/lib/whatsapp/queue"
 
 const ALERT_DEDUPE_SECONDS = 6 * 60 * 60
 const localClaims = new Map<string, number>()
@@ -127,7 +126,10 @@ export async function sendEmergencyDeliveryFailureAlert(input: {
   }
 
   for (const to of destinations) {
-    tasks.push(sendWhatsAppMessage({
+    // Dynamic import keeps the helper usable from the queue module's own
+    // Redis-unavailable path without creating an eager module cycle.
+    const queueModule = await import("@/lib/whatsapp/queue")
+    tasks.push(queueModule.sendWhatsAppMessage({
       to,
       provider: settings.provider,
       skipRegistrationCheck: true,
