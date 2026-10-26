@@ -5,6 +5,7 @@ import type { Attachment } from "nodemailer"
 import { createPanelLog } from "@/lib/panel-log"
 import { getEmailConfig, publicToLegacySmtp, type EmailConfigResolved } from "@/lib/email/config"
 import { recordEmailLog } from "@/lib/email/log"
+import { alertAdminEmailDeliveryFailure } from "@/lib/admin-email-failure-alert"
 
 export type SmtpErrorCode =
   | "SMTP_CONNECTION_TIMEOUT"
@@ -194,6 +195,9 @@ export async function sendEmail(input: SendMailInput) {
     const safeError = classifySmtpError(error)
     await createPanelLog({ ...baseLog, level: "warn", message: input.logMessage ? `${input.logMessage} skipped` : "Email skipped", metadata: { ...baseLog.metadata, reason: safeError.code } })
     await recordEmailLog({ templateKey: input.templateKey, recipient: recipients, subject: input.subject, status: "skipped", error: safeError.code, customerId: input.customerId, orderId: input.orderId, invoiceId: input.invoiceId, attachmentCount, metadata: baseLog.metadata })
+    if (input.metadata?.suppressEmailFailureAlert !== true) {
+      await alertAdminEmailDeliveryFailure({ notificationType: input.type, templateKey: input.templateKey, logMessage: input.logMessage, errorCode: safeError.code }).catch(() => null)
+    }
     if (input.throwOnError) throw safeError
     return { success: false as const, status: "skipped" as const, message: safeError.message, code: safeError.code }
   }
@@ -215,12 +219,16 @@ export async function sendEmail(input: SendMailInput) {
     await createPanelLog({
       ...baseLog,
       level: info.rejected?.length ? "warn" : "info",
-      message: input.logMessage || "mail_sent",
+      message: info.rejected?.length ? "mail_recipient_rejected" : input.logMessage || "mail_sent",
       metadata: { ...baseLog.metadata, ...safeMailLogSettings(config), messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response },
     })
+    if (info.rejected?.length && input.metadata?.suppressEmailFailureAlert !== true) {
+      await alertAdminEmailDeliveryFailure({ notificationType: input.type, templateKey: input.templateKey, logMessage: input.logMessage, errorCode: "SMTP_RECIPIENT_REJECTED" }).catch(() => null)
+    }
     return {
-      success: true as const,
-      status: "sent" as const,
+      success: !info.rejected?.length,
+      status,
+      message: info.rejected?.length ? "SMTP rejected one or more recipients." : undefined,
       messageId: info.messageId,
       accepted: info.accepted,
       rejected: info.rejected,
@@ -235,6 +243,9 @@ export async function sendEmail(input: SendMailInput) {
       metadata: { ...baseLog.metadata, ...safeMailLogSettings(config), errorCode: safeError.code, error: safeError.message },
     })
     await recordEmailLog({ templateKey: input.templateKey, recipient: recipients, subject: input.subject, status: "failed", error: safeError.message, customerId: input.customerId, orderId: input.orderId, invoiceId: input.invoiceId, attachmentCount, metadata: { ...baseLog.metadata, code: safeError.code } })
+    if (input.metadata?.suppressEmailFailureAlert !== true) {
+      await alertAdminEmailDeliveryFailure({ notificationType: input.type, templateKey: input.templateKey, logMessage: input.logMessage, errorCode: safeError.code }).catch(() => null)
+    }
     if (input.throwOnError) throw safeError
     return { success: false as const, status: "failed" as const, message: safeError.message, code: safeError.code }
   }
