@@ -50,8 +50,7 @@ export default function AdminInvoicesPage() {
   const [deleting, setDeleting] = useState(false)
   const [bulkLoading, setBulkLoading] = useState(false)
   const selectedCount = selectedIds.length
-  const deletableInvoices = invoices.filter((invoice) => invoice.deletionSafety?.deletable === true)
-  const allVisibleSelected = deletableInvoices.length > 0 && deletableInvoices.every((invoice) => selectedIds.includes(invoice.id))
+  const allVisibleSelected = invoices.length > 0 && invoices.every((invoice) => selectedIds.includes(invoice.id))
   const selectedDeletableCount = invoices.filter((invoice) => selectedIds.includes(invoice.id) && invoice.deletionSafety?.deletable === true).length
 
   const loadInvoices = useCallback(async () => {
@@ -61,7 +60,7 @@ export default function AdminInvoicesPage() {
     if (res.ok) {
       const rows = data.invoices || []
       setInvoices(rows)
-      setSelectedIds((ids) => ids.filter((id) => rows.some((invoice: Invoice) => invoice.id === id && invoice.deletionSafety?.deletable === true)))
+      setSelectedIds((ids) => ids.filter((id) => rows.some((invoice: Invoice) => invoice.id === id)))
     } else {
       toast.error(data.error || "Failed to load invoices")
     }
@@ -73,15 +72,12 @@ export default function AdminInvoicesPage() {
 
   function toggleVisible(checked: boolean) {
     const visibleIds = invoices.map((invoice) => invoice.id)
-    const deletableIds = deletableInvoices.map((invoice) => invoice.id)
     setSelectedIds((ids) => checked
-      ? [...new Set([...ids.filter((id) => !visibleIds.includes(id)), ...deletableIds])]
+      ? [...new Set([...ids, ...visibleIds])]
       : ids.filter((id) => !visibleIds.includes(id)))
   }
 
   function toggleInvoice(id: string, checked: boolean) {
-    const invoice = invoices.find((item) => item.id === id)
-    if (checked && invoice?.deletionSafety?.deletable !== true) return
     setSelectedIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))
   }
 
@@ -240,7 +236,7 @@ export default function AdminInvoicesPage() {
             <table className="w-full min-w-[1120px] text-sm">
               <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                 <tr className="border-b border-border/40 text-left text-muted-foreground">
-                  <th className="w-12 px-3 py-3"><Checkbox checked={allVisibleSelected} disabled={deletableInvoices.length === 0} onCheckedChange={(checked) => toggleVisible(Boolean(checked))} aria-label="Select eligible visible invoices" /></th>
+                  <th className="w-12 px-3 py-3"><Checkbox checked={allVisibleSelected} disabled={invoices.length === 0} onCheckedChange={(checked) => toggleVisible(Boolean(checked))} aria-label="Select visible invoices" /></th>
                   <th className="px-3 py-3">Invoice</th>
                   <th className="px-3 py-3">Customer</th>
                   <th className="px-3 py-3">Amount</th>
@@ -253,7 +249,7 @@ export default function AdminInvoicesPage() {
               <tbody>
                 {invoices.map((inv) => (
                   <tr key={inv.id} className="border-b border-border/20 transition hover:bg-[rgba(255,255,255,0.04)]">
-                    <td className="px-3 py-3"><Checkbox checked={selectedIds.includes(inv.id)} disabled={inv.deletionSafety?.deletable !== true} onCheckedChange={(checked) => toggleInvoice(inv.id, Boolean(checked))} aria-label={`Select ${inv.invoiceNumber}`} /></td>
+                    <td className="px-3 py-3"><Checkbox checked={selectedIds.includes(inv.id)} onCheckedChange={(checked) => toggleInvoice(inv.id, Boolean(checked))} aria-label={`Select ${inv.invoiceNumber}`} /></td>
                     <td className="px-3 py-3">
                       <p className="font-mono font-medium">{inv.invoiceNumber}</p>
                       <p className="text-xs text-muted-foreground">{inv.id.slice(0, 8)}</p>
