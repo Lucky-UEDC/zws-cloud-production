@@ -188,12 +188,24 @@ async function createLifecycleBestEffort(input: Parameters<typeof createWhatsApp
   }
 }
 
-function defaultJobOptions(options?: JobsOptions): JobsOptions {
-  const requestedAttempts = Number(options?.attempts ?? process.env.WHATSAPP_QUEUE_ATTEMPTS ?? 3)
+function defaultJobOptions(options?: JobsOptions, reliableMessage = false): JobsOptions {
+  // Customer-facing outbound messages get four total attempts, with a five-minute
+  // pause between retryable failures. OTP/auth and campaign queues keep their
+  // explicitly separate retry profile to avoid delaying time-sensitive codes.
+  const defaultAttempts = reliableMessage ? 4 : 3
+  const requestedAttempts = Number(options?.attempts ?? (reliableMessage
+    ? process.env.WHATSAPP_MESSAGE_ATTEMPTS ?? defaultAttempts
+    : process.env.WHATSAPP_QUEUE_ATTEMPTS ?? defaultAttempts))
+  const maxAttempts = reliableMessage ? 4 : 3
+  const retryDelayMs = reliableMessage
+    ? Number(process.env.WHATSAPP_MESSAGE_RETRY_DELAY_MS || 5 * 60_000)
+    : Number(process.env.WHATSAPP_QUEUE_BACKOFF_MS || 20_000)
   return {
     ...options,
-    attempts: Math.max(1, Math.min(3, Number.isFinite(requestedAttempts) ? requestedAttempts : 3)),
-    backoff: options?.backoff || { type: "exponential", delay: Number(process.env.WHATSAPP_QUEUE_BACKOFF_MS || 20_000) },
+    attempts: Math.max(1, Math.min(maxAttempts, Number.isFinite(requestedAttempts) ? requestedAttempts : defaultAttempts)),
+    backoff: options?.backoff || (reliableMessage
+      ? { type: "fixed", delay: retryDelayMs }
+      : { type: "exponential", delay: retryDelayMs }),
     removeOnComplete: { count: 1000 },
     removeOnFail: { count: 1000 },
   }
@@ -248,7 +260,7 @@ export async function enqueueWhatsAppMessage(input: WhatsAppSendJob, options?: J
   const jobOptions = defaultJobOptions({
     ...options,
     ...(businessDedupeKey && !options?.jobId ? { jobId: safeBullMqJobId([queueName, businessDedupeKey]) } : {}),
-  })
+  }, true)
   const job = await queue.add(queueName, { ...normalizedInput, messageLogId }, jobOptions)
   paymentFlowLog("WhatsApp sent", {
     orderId: normalizedInput.orderId || null,
