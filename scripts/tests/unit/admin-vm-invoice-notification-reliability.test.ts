@@ -17,7 +17,7 @@ test("invoice list provides server-classified deletion safety and disables unsaf
   const safety = read("lib/invoice-deletion.ts")
   assert.match(api, /deletionSafety: classifyInvoiceDeletionSafety\(invoice\)/)
   assert.match(ui, /disabled=\{inv\.deletionSafety\?\.deletable !== true\}/)
-  assert.match(ui, /deletableInvoices = invoices\.filter/)
+  assert.match(ui, /selectedDeletableCount = invoices\.filter/)
   assert.match(safety, /if \(successfulPayment\) return \{ deletable: false/)
   assert.match(safety, /if \(paidInvoice && orderActive\) return \{ deletable: false/)
 })
