@@ -1,0 +1,53 @@
+import test from "node:test"
+import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+
+const read = (path: string) => readFileSync(path, "utf8")
+
+test("VM edit only runs guest network automation when the IP actually changes", () => {
+  const source = read("app/api/admin/vms/[id]/edit/route.ts")
+  assert.match(source, /const changingIp = Boolean\(ipAddress && ipAddress !== vps\.ipAddress\)/)
+  assert.match(source, /if \(changingIp && ipAddress\) \{\s*const currentIp/)
+  assert.match(source, /guestChange = \{\s*kind: "network"/)
+})
+
+test("invoice list provides server-classified deletion safety and disables unsafe delete UI", () => {
+  const api = read("app/api/admin/invoices/route.ts")
+  const ui = read("app/admin/invoices/page.tsx")
+  const safety = read("lib/invoice-deletion.ts")
+  assert.match(api, /deletionSafety: classifyInvoiceDeletionSafety\(invoice\)/)
+  assert.match(ui, /disabled=\{inv\.deletionSafety\?\.deletable !== true\}/)
+  assert.match(ui, /deletableInvoices = invoices\.filter/)
+  assert.match(safety, /if \(successfulPayment\) return \{ deletable: false/)
+  assert.match(safety, /if \(paidInvoice && orderActive\) return \{ deletable: false/)
+})
+
+test("ordinary outbound WhatsApp messages use four attempts and a fixed five-minute backoff", () => {
+  const queue = read("lib/whatsapp/queue.ts")
+  assert.match(queue, /const defaultAttempts = reliableMessage \? 4 : 3/)
+  assert.match(queue, /5 \* 60_000/)
+  assert.match(queue, /type: "fixed"/)
+  assert.match(queue, /\}, true\)/)
+})
+
+test("terminal queue failures alert admins only after the last attempt and suppress alert loops", () => {
+  const worker = read("scripts/whatsapp-worker.ts")
+  const alerts = read("lib/admin-emergency-alert.ts")
+  assert.match(worker, /const attemptNumber = job\.attemptsMade \+ 1/)
+  assert.match(worker, /attemptNumber < attemptsLimit/)
+  assert.match(worker, /if \(!willRetry && data\.metadata\?\.suppressEmergencyAlert !== true\)/)
+  assert.match(alerts, /settings\.notificationEmail/)
+  assert.match(alerts, /settings\.notificationNumber/)
+  assert.match(alerts, /admin-emergency-alert:/)
+  assert.match(alerts, /suppressEmergencyAlert: true/)
+})
+
+test("emergency email can be configured from the admin notifications page", () => {
+  const settings = read("lib/admin-notifications.ts")
+  const page = read("app/admin/notifications/page.tsx")
+  const route = read("app/api/admin/notifications/settings/route.ts")
+  assert.match(settings, /notificationEmail: string/)
+  assert.match(page, /Emergency Email/)
+  assert.match(page, /notificationEmail/)
+  assert.match(route, /invalid_emergency_email/)
+})
