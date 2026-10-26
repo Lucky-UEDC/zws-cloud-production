@@ -117,7 +117,7 @@ export async function sendEmergencyDeliveryFailureAlert(input: {
       subject: "[ZWS Cloud] Emergency: message delivery failed",
       text: message,
       logMessage: "emergency_delivery_failure_alert",
-      metadata,
+      metadata: { ...metadata, suppressEmailFailureAlert: true },
       throwOnError: false,
     }).then((result) => {
       if (!result.success) throw new Error(result.message || "Emergency email was not sent")
