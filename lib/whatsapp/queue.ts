@@ -277,7 +277,41 @@ export async function enqueueWhatsAppMessage(input: WhatsAppSendJob, options?: J
     ...options,
     ...(businessDedupeKey && !options?.jobId ? { jobId: safeBullMqJobId([queueName, businessDedupeKey]) } : {}),
   }, true)
-  const job = await queue.add(queueName, { ...normalizedInput, messageLogId }, jobOptions)
+  let job: Awaited<ReturnType<typeof queue.add>>
+  try {
+    job = await queue.add(queueName, { ...normalizedInput, messageLogId }, jobOptions)
+  } catch (error) {
+    const classification = classifyWhatsAppError(error)
+    await writeWhatsAppQueueLog({
+      queueName,
+      event: "job.enqueue_failed",
+      status: "failed",
+      customerId: normalizedInput.customerId || null,
+      campaignId: normalizedInput.campaignId || null,
+      messageLogId,
+      phoneHash: normalized.phoneHash,
+      maskedPhone: normalized.maskedPhone,
+      attempt: 1,
+      failureReason: classification.failureReason,
+      metadata: { errorCode: classification.errorCode, source: "queue.add" },
+    }).catch(() => null)
+    if (normalizedInput.metadata?.suppressEmergencyAlert !== true) {
+      await sendEmergencyDeliveryFailureAlert({
+        queueName,
+        jobId: String(messageLogId || businessDedupeKey || "queue-add-failed"),
+        attemptCount: 1,
+        errorCode: "WHATSAPP_QUEUE_ENQUEUE_FAILED",
+        failureReason: classification.failureReason,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }).catch((alertError) => {
+        console.error("[whatsapp-queue] admin alert failed after queue.add error", {
+          queueName,
+          error: alertError instanceof Error ? alertError.message : String(alertError),
+        })
+      })
+    }
+    return { ok: false, status: "failed", error: "WhatsApp message could not be queued", toMasked: normalized.maskedPhone }
+  }
   paymentFlowLog("WhatsApp sent", {
     orderId: normalizedInput.orderId || null,
     invoiceId: normalizedInput.invoiceId || null,
@@ -338,7 +372,17 @@ export async function sendWhatsAppMessage(input: SendWhatsAppMessageInput, optio
       customerId: input.customerId || null,
       failureReason: "template_missing",
       metadata: { templateKey: input.templateKey, fallbackKey: input.fallbackKey || WHATSAPP_TEMPLATE_KEYS.SYSTEM_FALLBACK },
-    })
+    }).catch(() => null)
+    if (input.metadata?.suppressEmergencyAlert !== true) {
+      await sendEmergencyDeliveryFailureAlert({
+        queueName: WHATSAPP_SEND_QUEUE,
+        jobId: `template:${input.templateKey || "unknown"}`,
+        attemptCount: 1,
+        errorCode: "WHATSAPP_TEMPLATE_MISSING",
+        failureReason: "template_missing",
+        errorMessage: "The outbound notification template could not be resolved; the message was not queued.",
+      }).catch(() => null)
+    }
     return { ok: false, status: "failed", error: `WhatsApp template not found: ${input.templateKey}`, toMasked: normalized.maskedPhone }
   }
 
