@@ -55,6 +55,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Validate operational shell scripts
+        run: bash -n scripts/setup-cloudflare-tunnel-vps.sh
+
       - name: Prisma generate
         run: ./node_modules/.bin/prisma generate
 
