@@ -30,6 +30,7 @@ type Invoice = {
   totalAmount: number
   createdAt: string
   customer: { email: string; name: string | null }
+  deletionSafety?: { deletable: boolean; reason: string | null; paidInvoice: boolean }
 }
 
 const STATUS_FILTERS = ["pending", "failed", "cancelled", "expired", "unpaid", "paid", "sent", "draft", "overdue"]
@@ -50,6 +51,7 @@ export default function AdminInvoicesPage() {
   const [bulkLoading, setBulkLoading] = useState(false)
   const selectedCount = selectedIds.length
   const allVisibleSelected = invoices.length > 0 && invoices.every((invoice) => selectedIds.includes(invoice.id))
+  const selectedDeletableCount = invoices.filter((invoice) => selectedIds.includes(invoice.id) && invoice.deletionSafety?.deletable === true).length
 
   const loadInvoices = useCallback(async () => {
     const query = statusFilter ? `?status=${encodeURIComponent(statusFilter)}` : ""
@@ -97,6 +99,10 @@ export default function AdminInvoicesPage() {
 
   async function deleteInvoice() {
     if (!deleteTarget) return
+    if (deleteTarget.deletionSafety?.deletable !== true) {
+      toast.error("This invoice is protected by accounting safety rules. Use Void/Adjustment for corrections.")
+      return
+    }
     setDeleting(true)
     try {
       const res = await fetch(`/api/admin/invoices/${deleteTarget.id}`, {
@@ -123,6 +129,10 @@ export default function AdminInvoicesPage() {
   async function runBulkAction() {
     if (!bulkAction || !selectedIds.length) return
     if (bulkAction === "delete_selected_pending_cancelled") {
+      if (selectedDeletableCount === 0) {
+        toast.message("None of the selected invoices is eligible for permanent deletion. Paid/settled records are protected.")
+        return
+      }
       setBulkDeleteOpen(true)
       return
     }
@@ -157,7 +167,12 @@ export default function AdminInvoicesPage() {
         const deletedIds = Array.isArray(data.deletedIds) ? data.deletedIds.map(String) : []
         setInvoices((rows) => rows.filter((invoice) => !deletedIds.includes(invoice.id)))
         setSelectedIds((ids) => ids.filter((id) => !deletedIds.includes(id)))
-        toast.success(`${data.deleted || 0} invoices permanently deleted`)
+        const skippedCount = Array.isArray(data.result?.skipped) ? data.result.skipped.length : Math.max(0, Number(data.skipped || 0))
+        if (skippedCount > 0) {
+          toast.message(`${data.deleted || 0} invoice(s) deleted; ${skippedCount} protected invoice(s) skipped.`)
+        } else {
+          toast.success(`${data.deleted || 0} invoices permanently deleted`)
+        }
         setBulkDeleteOpen(false)
         setDeleteReason("")
         await loadInvoices()
@@ -212,9 +227,9 @@ export default function AdminInvoicesPage() {
             <div className="sticky top-3 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--border-selected)] bg-[var(--surface-solid)] p-3 shadow-lg shadow-black/30 backdrop-blur">
               <div>
                 <p className="text-sm font-medium">{selectedCount} selected</p>
-                <p className="text-xs text-muted-foreground">Selected invoices can be permanently deleted.</p>
+                <p className="text-xs text-muted-foreground">Only invoices approved by the server-side safety check can be deleted. Paid/settled invoices and active-service invoices are protected.</p>
               </div>
-              <Button size="sm" variant="destructive" onClick={() => setBulkDeleteOpen(true)} disabled={bulkLoading}>
+              <Button size="sm" variant="destructive" onClick={() => setBulkDeleteOpen(true)} disabled={bulkLoading || selectedDeletableCount === 0}>
                 <Trash2 className="h-4 w-4" />
                 Delete selected invoices
               </Button>
@@ -225,7 +240,7 @@ export default function AdminInvoicesPage() {
             <table className="w-full min-w-[1120px] text-sm">
               <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                 <tr className="border-b border-border/40 text-left text-muted-foreground">
-                  <th className="w-12 px-3 py-3"><Checkbox checked={allVisibleSelected} onCheckedChange={(checked) => toggleVisible(Boolean(checked))} aria-label="Select visible invoices" /></th>
+                  <th className="w-12 px-3 py-3"><Checkbox checked={allVisibleSelected} disabled={invoices.length === 0} onCheckedChange={(checked) => toggleVisible(Boolean(checked))} aria-label="Select visible invoices" /></th>
                   <th className="px-3 py-3">Invoice</th>
                   <th className="px-3 py-3">Customer</th>
                   <th className="px-3 py-3">Amount</th>
@@ -256,7 +271,7 @@ export default function AdminInvoicesPage() {
                         {inv.status !== "paid" ? <Button size="icon" title="Mark paid" onClick={() => invoiceAction(inv.id, "mark_paid")}><CheckCircle2 className="h-4 w-4" /></Button> : null}
                         {inv.status !== "paid" && inv.status !== "cancelled" ? <Button size="icon" variant="outline" title="Cancel invoice" onClick={() => invoiceAction(inv.id, "cancel")}><XCircle className="h-4 w-4" /></Button> : null}
                         <Button size="icon" variant="outline" title="Resend invoice" onClick={() => invoiceAction(inv.id, "resend")}><Send className="h-4 w-4" /></Button>
-                        <Button size="icon" variant="destructive" title="Delete invoice" onClick={() => setDeleteTarget(inv)}><Trash2 className="h-4 w-4" /></Button>
+                        <Button size="icon" variant="destructive" title={inv.deletionSafety?.deletable ? "Delete invoice" : "Protected: use Void/Adjustment for accounting corrections"} disabled={inv.deletionSafety?.deletable !== true} onClick={() => setDeleteTarget(inv)}><Trash2 className="h-4 w-4" /></Button>
                       </div>
                     </td>
                   </tr>
@@ -278,7 +293,7 @@ export default function AdminInvoicesPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete permanently?</AlertDialogTitle>
             <AlertDialogDescription>
-              This action cannot be undone.
+              This action cannot be undone. Paid/settled invoices and invoices tied to active services are protected; the server rechecks safety before deletion.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-2">
@@ -303,7 +318,7 @@ export default function AdminInvoicesPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete permanently?</AlertDialogTitle>
             <AlertDialogDescription>
-              This action cannot be undone.
+              This action cannot be undone. Paid/settled invoices and invoices tied to active services are protected; the server rechecks safety before deletion.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Textarea value={deleteReason} onChange={(event) => setDeleteReason(event.target.value)} placeholder="Reason, for example: duplicate test invoices" />

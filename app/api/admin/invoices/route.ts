@@ -4,6 +4,7 @@ import { getAdminFromCookies } from "@/lib/server-auth"
 import { invoiceTaxWriteFields } from "@/lib/invoices/tax"
 import { createInvoiceForOrder } from "@/lib/invoices"
 import { handlePaidInvoice } from "@/lib/payment-finalization"
+import { classifyInvoiceDeletionSafety, invoiceDeletionInclude } from "@/lib/invoice-deletion"
 
 function generateOrderNumber(): string {
   const timestamp = Date.now().toString(36).toUpperCase()
@@ -22,12 +23,16 @@ export async function GET(request: NextRequest) {
     orderBy: { createdAt: "desc" },
     include: {
       customer: { select: { id: true, email: true, name: true } },
-      order: { select: { orderNumber: true } },
-      payments: { take: 3, orderBy: { createdAt: "desc" } },
+      ...invoiceDeletionInclude(),
     },
   })
 
-  return NextResponse.json({ invoices })
+  return NextResponse.json({
+    invoices: invoices.map((invoice) => ({
+      ...invoice,
+      deletionSafety: classifyInvoiceDeletionSafety(invoice),
+    })),
+  })
 }
 
 export async function POST(request: NextRequest) {

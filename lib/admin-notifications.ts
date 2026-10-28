@@ -24,6 +24,7 @@ export type AdminNotificationSettings = {
   enabled: boolean
   notificationNumber: string
   operationsNumbers: string[]
+  notificationEmail: string
   deliveryMode: "whatsapp_only" | "whatsapp_email" | "silent_log"
   provider: "evolution"
   events: Record<AdminNotificationEvent, boolean>
@@ -49,6 +50,7 @@ export async function getAdminNotificationSettings(): Promise<AdminNotificationS
     enabled: value.enabled !== false,
     notificationNumber: String(value.notificationNumber || await getDefaultAdminNotificationNumber()),
     operationsNumbers: Array.isArray(value.operationsNumbers) ? value.operationsNumbers.map((item: unknown) => String(item || "").trim()).filter(Boolean) : [],
+    notificationEmail: String(value.notificationEmail || ""),
     deliveryMode: ["whatsapp_only", "whatsapp_email", "silent_log"].includes(String(value.deliveryMode)) ? value.deliveryMode : "whatsapp_only",
     provider: "evolution",
     events: { ...defaultEvents(), ...(value.events || {}) },
@@ -59,8 +61,9 @@ export async function updateAdminNotificationSettings(input: Partial<AdminNotifi
   const current = await getAdminNotificationSettings()
   const next: AdminNotificationSettings = {
     enabled: input.enabled ?? current.enabled,
-    notificationNumber: String(input.notificationNumber ?? current.notificationNumber ?? ""),
+    notificationNumber: String(input.notificationNumber ?? current.notificationNumber ?? "").trim(),
     operationsNumbers: Array.isArray(input.operationsNumbers) ? input.operationsNumbers.map((item) => String(item || "").trim()).filter(Boolean) : current.operationsNumbers,
+    notificationEmail: String(input.notificationEmail ?? current.notificationEmail ?? "").trim(),
     deliveryMode: input.deliveryMode || current.deliveryMode,
     provider: input.provider || current.provider,
     events: { ...current.events, ...(input.events || {}) },

@@ -31,6 +31,7 @@ import { resolveAndRenderWhatsAppTemplate, validateWhatsAppRequiredTemplates } f
 import { WHATSAPP_TEMPLATE_KEYS } from "@/lib/whatsapp/template-registry"
 import { getEvolutionStatus } from "@/lib/whatsapp/evolution"
 import { paymentFlowError, paymentFlowLog } from "@/lib/payment-flow-log"
+import { sendEmergencyDeliveryFailureAlert } from "@/lib/admin-emergency-alert"
 
 process.env.ZWS_WHATSAPP_WORKER = "true"
 process.env.WHATSAPP_RUNTIME_OWNER ||= "worker"
@@ -105,8 +106,11 @@ async function markJobProcessing(job: Job<WhatsAppSendJob>, queueName: string) {
 async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, error: unknown) {
   const data = job.data
   const classification = classifyWhatsAppError(error)
-  const attemptsLimit = Number(job.opts.attempts || process.env.WHATSAPP_QUEUE_ATTEMPTS || 3)
-  const willRetry = classification.retryable && job.attemptsMade < attemptsLimit
+  const attemptsLimit = Math.max(1, Number(job.opts.attempts || process.env.WHATSAPP_QUEUE_ATTEMPTS || 3))
+  // Inside the processor, attemptsMade counts prior failures. This is the
+  // current attempt number, so the alert fires only after the configured final try.
+  const attemptNumber = job.attemptsMade + 1
+  const willRetry = classification.retryable && attemptNumber < attemptsLimit
   if (!classification.retryable) job.discard()
 
   await Promise.allSettled([
@@ -120,8 +124,8 @@ async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, e
       stackTrace: safeStackTrace(error),
       queueName,
       queueJobId: job.id || null,
-      retryCount: job.attemptsMade,
-      metadata: { errorCode: classification.errorCode, retryable: classification.retryable, willRetry, attemptsLimit },
+      retryCount: attemptNumber,
+      metadata: { errorCode: classification.errorCode, retryable: classification.retryable, willRetry, attemptsLimit, attemptNumber },
     }),
     writeWhatsAppQueueLog({
       queueName,
@@ -132,9 +136,9 @@ async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, e
       campaignId: data.campaignId || null,
       campaignLogId: data.campaignLogId || null,
       messageLogId: data.messageLogId || null,
-      attempt: job.attemptsMade,
+      attempt: attemptNumber,
       failureReason: classification.failureReason,
-      metadata: { errorCode: classification.errorCode, retryable: classification.retryable, willRetry },
+      metadata: { errorCode: classification.errorCode, retryable: classification.retryable, willRetry, attemptNumber, attemptsLimit },
     }),
     writeWhatsAppErrorLog({
       error,
@@ -144,7 +148,7 @@ async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, e
       campaignId: data.campaignId || null,
       campaignLogId: data.campaignLogId || null,
       messageLogId: data.messageLogId || null,
-      metadata: { willRetry, attemptsLimit },
+      metadata: { willRetry, attemptsLimit, attemptNumber },
     }),
     data.recipientId
       ? (prisma as any).whatsAppCampaignRecipient.update({
@@ -176,6 +180,25 @@ async function handleSendFailure(job: Job<WhatsAppSendJob>, queueName: string, e
   ])
 
   if (data.campaignId) await syncCampaignCounters(data.campaignId).catch(() => null)
+
+  // Never send alerts for intermediate attempts. The alert itself marks its
+  // WhatsApp job to prevent recursive alerts if the provider is still broken.
+  if (!willRetry && data.metadata?.suppressEmergencyAlert !== true) {
+    await sendEmergencyDeliveryFailureAlert({
+      queueName,
+      jobId: job.id == null ? null : String(job.id),
+      attemptCount: attemptNumber,
+      errorCode: classification.errorCode,
+      failureReason: classification.failureReason,
+      errorMessage: safeErrorMessage(error),
+    }).catch((alertError) => {
+      console.error("[whatsapp-worker] terminal failure admin alert could not be dispatched", {
+        queueName,
+        jobId: job.id || null,
+        error: safeErrorMessage(alertError),
+      })
+    })
+  }
 }
 
 async function processSendJob(job: Job<WhatsAppSendJob>, queueName: string) {

@@ -135,6 +135,12 @@ describe("CI docker step is actually inspectable", () => {
   })
 
   it("resolves the pnpm version from packageManager", () => {
-    assert.equal(/pnpm\/action-setup[\s\S]{0,200}version:\s*\d/.test(ci), false, "a second pinned pnpm version must not conflict with packageManager")
+    // Inspect only the pnpm/action-setup step. A broad 200-character scan also
+    // matches the following setup-node step's node-version: 22 and falsely fails.
+    const actionStart = ci.indexOf("uses: pnpm/action-setup")
+    assert.notEqual(actionStart, -1, "CI must use pnpm/action-setup")
+    const nextStepStart = ci.indexOf("\n      - ", actionStart)
+    const pnpmSetupStep = ci.slice(actionStart, nextStepStart === -1 ? undefined : nextStepStart)
+    assert.equal(/^\s*version:\s*\d/m.test(pnpmSetupStep), false, "pnpm must be resolved from packageManager, not pinned a second time")
   })
 })
