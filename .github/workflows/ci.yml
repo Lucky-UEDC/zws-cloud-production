@@ -74,6 +74,16 @@ jobs:
         env:
           ZWS_SKIP_SETTINGS_DB_DURING_BUILD: "1"
 
+      - name: Reclaim disposable runner disk space before Docker build
+        # GitHub-hosted Ubuntu runners ship with several large SDKs this app does
+        # not use. Docker BuildKit needs free space to load the verified image.
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/powershell /usr/local/share/chromium || true
+          docker system prune -af --volumes || true
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
