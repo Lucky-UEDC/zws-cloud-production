@@ -65,3 +65,17 @@ test("emergency email can be configured from the admin notifications page", () =
   assert.match(emailAlert, /The recipient address and email content are intentionally omitted/)
   assert.match(emailAlert, /settings\.operationsNumbers/)
 })
+
+test("Cloudflare tunnel setup reuses the VPS login and exposes only the two intended hostnames", () => {
+  const script = read("scripts/setup-cloudflare-tunnel-vps.sh")
+  assert.match(script, /CLOUDFLARED_CERT.*CF_HOME.*cert\.pem/)
+  assert.match(script, /dev\.zwscloud\.in/)
+  assert.match(script, /api-panel\.zwscloud\.in/)
+  assert.match(script, /127\.0\.0\.1:13000/)
+  assert.match(script, /service: http_status:404/)
+  assert.match(script, /cloudflared tunnel route dns/)
+  assert.match(script, /cloudflared --config "\$CONFIG_FILE" tunnel ingress validate/)
+  assert.match(script, /No existing record was overwritten/)
+  assert.match(script, /does not modify firewall rules/)
+  assert.doesNotMatch(script, /CF_API_TOKEN=|CF_TUNNEL_TOKEN=/)
+})
