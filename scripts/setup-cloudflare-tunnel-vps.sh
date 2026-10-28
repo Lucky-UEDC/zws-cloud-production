@@ -47,8 +47,10 @@ cleanup() { rm -f "$TMP_LIST" "$TMP_CONFIG" "$TMP_UNIT" "$TMP_ROUTE_LOG"; }
 trap cleanup EXIT
 
 list_tunnels() {
-  cloudflared tunnel list --output json > "$TMP_LIST" 2>"$TMP_ROUTE_LOG" ||
-    die "Cloudflare authentication/list failed. Existing certificate could be invalid. No tunnel was started. Check: $TMP_ROUTE_LOG"
+  if ! cloudflared tunnel list --output json > "$TMP_LIST" 2>"$TMP_ROUTE_LOG"; then
+    cat "$TMP_ROUTE_LOG" >&2
+    die "Cloudflare authentication/list failed. The login certificate may be invalid/expired. No tunnel was started. If required, authenticate on this VPS using: cloudflared tunnel login"
+  fi
 }
 
 find_tunnel_id() {
@@ -116,6 +118,18 @@ EOF
 chmod 600 "$TMP_CONFIG"
 cloudflared --config "$TMP_CONFIG" tunnel ingress validate
 
+# An operator may confirm that a pre-existing record already points to this
+# exact tunnel. This override is explicit and is never guessed from DNS results.
+if [[ -n "${DNS_ALREADY_ROUTED_HOSTS:-}" ]]; then
+  IFS=',' read -r -a confirmed_hosts <<< "$DNS_ALREADY_ROUTED_HOSTS"
+  for host in "${confirmed_hosts[@]}"; do
+    host="$(printf '%s' "$host" | xargs)"
+    [[ "$host" == "$DEV_HOST" || "$host" == "$API_HOST" ]] || die "DNS_ALREADY_ROUTED_HOSTS contains an unexpected hostname: $host"
+    printf '%s\n' "$TUNNEL_ID" > "${MARKER_DIR}/${TUNNEL_ID}-${host}"
+    chmod 600 "${MARKER_DIR}/${TUNNEL_ID}-${host}"
+  done
+fi
+
 # Routes are created one hostname at a time. Successful routes are marked so a
 # rerun can resume after a partial DNS failure. Existing conflicting records are
 # NOT overwritten; inspect them in Cloudflare before retrying.
@@ -135,18 +149,6 @@ for host in "$DEV_HOST" "$API_HOST"; do
     die "Could not route $host. An existing DNS record may conflict. No existing record was overwritten. Check the record in Cloudflare, then if it already points to $TUNNEL_ID.cfargotunnel.com, set DNS_ALREADY_ROUTED_HOSTS=$host before rerunning."
   fi
 done
-
-# An operator may confirm that a pre-existing record already points to this
-# exact tunnel. This override is explicit and is never guessed from DNS results.
-if [[ -n "${DNS_ALREADY_ROUTED_HOSTS:-}" ]]; then
-  IFS=',' read -r -a confirmed_hosts <<< "$DNS_ALREADY_ROUTED_HOSTS"
-  for host in "${confirmed_hosts[@]}"; do
-    host="$(printf '%s' "$host" | xargs)"
-    [[ "$host" == "$DEV_HOST" || "$host" == "$API_HOST" ]] || die "DNS_ALREADY_ROUTED_HOSTS contains an unexpected hostname: $host"
-    printf '%s\n' "$TUNNEL_ID" > "${MARKER_DIR}/${TUNNEL_ID}-${host}"
-    chmod 600 "${MARKER_DIR}/${TUNNEL_ID}-${host}"
-  done
-fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
   cp -a "$CONFIG_FILE" "${BACKUP_DIR}/zwscloud-panel.yml.$(date +%Y%m%d%H%M%S).bak"
